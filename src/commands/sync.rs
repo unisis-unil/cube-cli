@@ -2,9 +2,11 @@ use anyhow::{bail, Context, Result};
 use base64::Engine;
 use chrono::Utc;
 use console::style;
+use flate2::read::GzDecoder;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::process::Command;
@@ -26,6 +28,10 @@ struct SyncMetadata {
     remote_timestamp: String,
     #[serde(default)]
     last_checked_at: Option<String>,
+    /// Remote CRC32C (base64) per local filename, to skip re-download when
+    /// files are stored decompressed locally (.sqlite) but compressed on GCS (.sqlite.gz).
+    #[serde(default)]
+    file_checksums: HashMap<String, String>,
 }
 
 fn default_cache_dir(dev: bool) -> Result<std::path::PathBuf> {
@@ -197,6 +203,17 @@ fn sqlite_integrity_ok(path: &Path) -> bool {
     .is_ok()
 }
 
+// ── Gzip decompression ─────────────────────────────────────────────
+
+/// Decompress a .gz file to a destination path.
+fn decompress_gz(gz_path: &Path, dest: &Path) -> Result<()> {
+    let gz_file = std::fs::File::open(gz_path)?;
+    let mut decoder = GzDecoder::new(gz_file);
+    let mut out = std::fs::File::create(dest)?;
+    std::io::copy(&mut decoder, &mut out)?;
+    Ok(())
+}
+
 // ── Download ────────────────────────────────────────────────────────
 
 fn download_object(
@@ -361,15 +378,15 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
         );
     }
 
-    // List all .sqlite objects in the latest snapshot
+    // List all .sqlite.gz objects in the latest snapshot
     let objects = gcs_list_objects(&client, &token, bucket, &remote_prefix)?;
     let sqlite_objects: Vec<GcsObject> = objects
         .into_iter()
-        .filter(|o| o.name.ends_with(".sqlite"))
+        .filter(|o| o.name.ends_with(".sqlite.gz"))
         .collect();
 
     if sqlite_objects.is_empty() {
-        bail!("Aucun fichier .sqlite trouvé dans gs://{bucket}/{remote_prefix}");
+        bail!("Aucun fichier .sqlite.gz trouvé dans gs://{bucket}/{remote_prefix}");
     }
 
     // Set up multi-progress display
@@ -382,29 +399,39 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     let mut skipped: u64 = 0;
     let mut downloaded_bytes: u64 = 0;
 
-    let remote_filenames: Vec<String> = sqlite_objects
+    // Map remote .sqlite.gz names to local .sqlite names
+    let local_filenames: Vec<String> = sqlite_objects
         .iter()
-        .filter_map(|o| o.name.rsplit('/').next().map(|s| s.to_string()))
+        .filter_map(|o| {
+            o.name
+                .rsplit('/')
+                .next()
+                .map(|gz| gz.strip_suffix(".gz").unwrap_or(gz).to_string())
+        })
         .collect();
 
     for obj in &sqlite_objects {
-        let filename = obj.name.rsplit('/').next().unwrap_or(&obj.name);
-        let display_name = filename.strip_suffix(".sqlite").unwrap_or(filename);
-        let local_path = cache.join(filename);
+        let gz_filename = obj.name.rsplit('/').next().unwrap_or(&obj.name);
+        let local_filename = gz_filename.strip_suffix(".gz").unwrap_or(gz_filename);
+        let display_name = local_filename.strip_suffix(".sqlite").unwrap_or(local_filename);
+        let local_path = cache.join(local_filename);
 
         overall.set_message(display_name.to_string());
 
-        // Check if local file matches remote (CRC32C comparison)
-        if local_path.exists() {
-            if let Ok(local_hash) = local_crc32c_b64(&local_path) {
-                if local_hash == obj.crc32c {
+        // Skip if local file exists and remote CRC32C hasn't changed (stored in metadata)
+        if !force && local_path.exists() {
+            if let Some(stored_crc) = meta.file_checksums.get(local_filename) {
+                if *stored_crc == obj.crc32c {
                     let done_pb = mp.add(ProgressBar::new(0));
                     done_pb.set_style(style_done());
                     done_pb.set_prefix(display_name.to_string());
+                    let local_size = std::fs::metadata(&local_path)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
                     done_pb.finish_with_message(format!(
                         "{} à jour ({})",
                         style("✓").green(),
-                        format_size(obj.size)
+                        format_size(local_size)
                     ));
                     skipped += 1;
                     overall.inc(1);
@@ -413,23 +440,24 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
             }
         }
 
-        // Download to a temp file, then rename atomically to avoid partial files
-        let tmp_path = cache.join(format!(".{filename}.tmp"));
+        // Download .gz to a temp file
+        let tmp_gz = cache.join(format!(".{gz_filename}.tmp"));
+        let tmp_sqlite = cache.join(format!(".{local_filename}.tmp"));
         let file_pb = mp.add(ProgressBar::new(obj.size));
         file_pb.set_style(style_download());
         file_pb.set_prefix(display_name.to_string());
 
-        if let Err(e) = download_object(&client, &token, bucket, obj, &tmp_path, &file_pb) {
-            let _ = std::fs::remove_file(&tmp_path);
+        if let Err(e) = download_object(&client, &token, bucket, obj, &tmp_gz, &file_pb) {
+            let _ = std::fs::remove_file(&tmp_gz);
             file_pb.set_style(style_done());
             file_pb.finish_with_message(format!("{} erreur", style("✗").red()));
             bail!(e);
         }
 
-        // Verify CRC32C matches the remote object
-        if let Ok(local_hash) = local_crc32c_b64(&tmp_path) {
+        // Verify CRC32C of the compressed file
+        if let Ok(local_hash) = local_crc32c_b64(&tmp_gz) {
             if local_hash != obj.crc32c {
-                let _ = std::fs::remove_file(&tmp_path);
+                let _ = std::fs::remove_file(&tmp_gz);
                 file_pb.set_style(style_done());
                 file_pb.finish_with_message(format!(
                     "{} hash incorrect, ignoré",
@@ -440,9 +468,24 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
             }
         }
 
-        // Verify SQLite integrity before accepting the file
-        if !sqlite_integrity_ok(&tmp_path) {
-            let _ = std::fs::remove_file(&tmp_path);
+        // Decompress .gz → .sqlite
+        if let Err(e) = decompress_gz(&tmp_gz, &tmp_sqlite) {
+            let _ = std::fs::remove_file(&tmp_gz);
+            let _ = std::fs::remove_file(&tmp_sqlite);
+            file_pb.set_style(style_done());
+            file_pb.finish_with_message(format!(
+                "{} décompression échouée: {}",
+                style("✗").yellow(),
+                e
+            ));
+            overall.inc(1);
+            continue;
+        }
+        let _ = std::fs::remove_file(&tmp_gz);
+
+        // Verify SQLite integrity of the decompressed file
+        if !sqlite_integrity_ok(&tmp_sqlite) {
+            let _ = std::fs::remove_file(&tmp_sqlite);
             file_pb.set_style(style_done());
             file_pb.finish_with_message(format!(
                 "{} corrompu, ignoré",
@@ -452,17 +495,24 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
             continue;
         }
 
-        std::fs::rename(&tmp_path, &local_path)?;
+        let decompressed_size = std::fs::metadata(&tmp_sqlite)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        std::fs::rename(&tmp_sqlite, &local_path)?;
+        meta.file_checksums
+            .insert(local_filename.to_string(), obj.crc32c.clone());
 
         file_pb.set_style(style_done());
         file_pb.finish_with_message(format!(
-            "{} téléchargé ({})",
+            "{} téléchargé ({} gz → {})",
             style("✓").green(),
-            format_size(obj.size)
+            format_size(obj.size),
+            format_size(decompressed_size)
         ));
 
         downloaded += 1;
-        downloaded_bytes += obj.size;
+        downloaded_bytes += decompressed_size;
         overall.inc(1);
     }
 
@@ -474,7 +524,8 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("sqlite") {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if !remote_filenames.contains(&name.to_string()) {
+                if !local_filenames.contains(&name.to_string()) {
+                    meta.file_checksums.remove(name);
                     std::fs::remove_file(&path)?;
                     eprintln!("  {} supprimé (absent du remote)", name);
                 }
@@ -508,6 +559,7 @@ mod tests {
         let meta = SyncMetadata {
             remote_timestamp: "2026-03-12T231707".to_string(),
             last_checked_at: Some("2026-03-12T23:17:07+00:00".to_string()),
+            file_checksums: HashMap::new(),
         };
 
         write_sync_metadata(tmp.path(), &meta).unwrap();
@@ -597,5 +649,71 @@ mod tests {
         assert_eq!(format_size(500), "500 B");
         assert_eq!(format_size(2048), "2 KB");
         assert_eq!(format_size(5_500_000), "5.2 MB");
+    }
+
+    #[test]
+    fn test_decompress_gz() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let tmp = TempDir::new().unwrap();
+        let gz_path = tmp.path().join("test.sqlite.gz");
+        let out_path = tmp.path().join("test.sqlite");
+
+        // Create a gzipped file
+        let original = b"hello gzip world";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(original).unwrap();
+        let compressed = encoder.finish().unwrap();
+        std::fs::write(&gz_path, &compressed).unwrap();
+
+        // Decompress
+        decompress_gz(&gz_path, &out_path).unwrap();
+        let result = std::fs::read(&out_path).unwrap();
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn test_decompress_gz_invalid() {
+        let tmp = TempDir::new().unwrap();
+        let gz_path = tmp.path().join("bad.gz");
+        let out_path = tmp.path().join("bad.sqlite");
+
+        std::fs::write(&gz_path, b"not gzip data").unwrap();
+        assert!(decompress_gz(&gz_path, &out_path).is_err());
+    }
+
+    #[test]
+    fn test_sync_metadata_with_checksums() {
+        let tmp = TempDir::new().unwrap();
+        let mut checksums = HashMap::new();
+        checksums.insert("cube_a.sqlite".to_string(), "abc123==".to_string());
+        checksums.insert("cube_b.sqlite".to_string(), "def456==".to_string());
+
+        let meta = SyncMetadata {
+            remote_timestamp: "2026-03-13T120000".to_string(),
+            last_checked_at: None,
+            file_checksums: checksums,
+        };
+
+        write_sync_metadata(tmp.path(), &meta).unwrap();
+        let loaded = read_sync_metadata(tmp.path());
+
+        assert_eq!(loaded.file_checksums.len(), 2);
+        assert_eq!(
+            loaded.file_checksums.get("cube_a.sqlite").unwrap(),
+            "abc123=="
+        );
+    }
+
+    #[test]
+    fn test_sync_metadata_without_checksums_field() {
+        let tmp = TempDir::new().unwrap();
+        // Simulate old metadata format without file_checksums
+        let json = r#"{"remote_timestamp": "ts1", "last_checked_at": "2026-01-01T00:00:00Z"}"#;
+        std::fs::write(tmp.path().join(SYNC_METADATA_FILE), json).unwrap();
+        let meta = read_sync_metadata(tmp.path());
+        assert_eq!(meta.remote_timestamp, "ts1");
+        assert!(meta.file_checksums.is_empty());
     }
 }
