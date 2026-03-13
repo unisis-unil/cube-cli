@@ -5,6 +5,7 @@ mod formatter;
 
 use chrono::Local;
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -199,6 +200,23 @@ enum Commands {
     },
 }
 
+/// Returns true if the local cache directory has no .sqlite files.
+fn cache_is_empty(dev: bool) -> bool {
+    let cache = match commands::schema::default_cache_dir(dev) {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    if !cache.exists() {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(&cache) else {
+        return true;
+    };
+    !entries
+        .flatten()
+        .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sqlite"))
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -220,6 +238,25 @@ fn main() -> ExitCode {
     // Check for cube updates before schema/query/sql (not sync)
     if !is_sync {
         commands::sync::check_for_updates(dev);
+
+        // If the cache is empty, offer to sync first
+        if cache_is_empty(dev) {
+            let sync_cmd = if dev { "cube --dev sync" } else { "cube sync" };
+            if std::io::stderr().is_terminal() {
+                eprintln!("Aucun cube en cache. Lancement de la synchronisation...\n");
+                let bucket = commands::sync::bucket_for(dev);
+                if let Err(e) = commands::sync::run(bucket, "cubes/", None, false) {
+                    error::print_json_error(&e);
+                    return ExitCode::FAILURE;
+                }
+                eprintln!();
+            } else {
+                error::print_json_error(&error::CubeError::not_found(format!(
+                    "Aucun cube en cache. Exécutez '{sync_cmd}' pour télécharger les cubes."
+                )));
+                return ExitCode::FAILURE;
+            }
+        }
     }
 
     let result = match command {

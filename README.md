@@ -11,8 +11,6 @@ CLI pour interroger les cubes SQLite de la plateforme **UNISIS S3** (Statistique
 
 ## Prérequis
 
-- [Rust](https://rustup.rs/) (édition 2021+)
-- [just](https://github.com/casey/just) — task runner
 - [Google Cloud SDK](https://cloud.google.com/sdk) (`gcloud`) — pour la synchronisation
 
 Avant la première synchronisation :
@@ -23,31 +21,37 @@ gcloud auth application-default login
 
 ## Installation
 
+### Homebrew (macOS / Linux)
+
+```bash
+brew tap unisis-unil/tools
+brew install cube
+```
+
+### Script d'installation
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/unisis-unil/cube-cli/main/install.sh | sh
+```
+
+### Depuis les sources
+
+Nécessite [Rust](https://rustup.rs/) (édition 2021+) et [just](https://github.com/casey/just) :
+
 ```bash
 just install      # Compile et installe cube dans ~/.cargo/bin/
 ```
 
-Le binaire `cube` sera installé dans `~/.cargo/bin/`. Assurez-vous que ce répertoire est dans votre `PATH` :
-
-```bash
-# Dans ~/.zshrc ou ~/.bashrc
-export PATH="$HOME/.cargo/bin:$PATH"
-```
-
-## Tâches disponibles
+## Développement
 
 ```bash
 just              # Affiche toutes les tâches disponibles
 just build        # Compile en mode debug
 just release      # Compile en mode release optimisé
-just install      # Installe cube dans ~/.cargo/bin/
-just uninstall    # Désinstalle cube
 just test         # Lance tous les tests
 just check        # Vérifie le code (clippy + fmt)
 just fmt          # Formate le code
-just sync         # Synchronise les cubes depuis GCS
-just schema       # Liste les cubes disponibles
-just run <ARGS>   # Exécute cube avec des arguments arbitraires
+just bump patch   # Bump de version, commit, tag
 ```
 
 ## Utilisation
