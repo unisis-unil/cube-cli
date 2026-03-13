@@ -1,12 +1,12 @@
 [package]
 name = "cube"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "CLI pour interroger les cubes SQLite de la plateforme UNISIS S3 (Statistiques en Self-Service)"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 comfy-table = "7"
@@ -23,6 +23,7 @@ urlencoding = "2"
 unicode-normalization = "0.1"
 regex = "1"
 flate2 = "1"
+keyring = { version = "3", features = ["linux-native"] }
 
 [dev-dependencies]
 assert_cmd = "2"
