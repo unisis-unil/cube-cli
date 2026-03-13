@@ -48,26 +48,6 @@ pub fn get_row_count(conn: &Connection) -> Result<i64> {
     Ok(count)
 }
 
-pub fn get_distinct_count(conn: &Connection, column: &str) -> Result<i64> {
-    let count: i64 = conn.query_row(
-        &format!("SELECT COUNT(DISTINCT \"{}\") FROM data", column),
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(count)
-}
-
-pub fn get_sample_values(conn: &Connection, column: &str, limit: usize) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT DISTINCT \"{}\" FROM data WHERE \"{}\" IS NOT NULL LIMIT {}",
-        column, column, limit
-    ))?;
-    let values = stmt
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(values)
-}
-
 pub fn get_numeric_stats(conn: &Connection, column: &str) -> Result<(f64, f64, i64)> {
     let (min, max, distinct): (f64, f64, i64) = conn.query_row(
         &format!(
@@ -153,30 +133,6 @@ mod tests {
     fn test_get_row_count() {
         let (_tmp, conn) = setup_db();
         assert_eq!(get_row_count(&conn).unwrap(), 5);
-    }
-
-    #[test]
-    fn test_get_distinct_count() {
-        let (_tmp, conn) = setup_db();
-        assert_eq!(get_distinct_count(&conn, "Faculté").unwrap(), 3);
-        assert_eq!(get_distinct_count(&conn, "Année").unwrap(), 2);
-    }
-
-    #[test]
-    fn test_get_sample_values() {
-        let (_tmp, conn) = setup_db();
-        let samples = get_sample_values(&conn, "Faculté", 5).unwrap();
-        assert_eq!(samples.len(), 3);
-        assert!(samples.contains(&"FBM".to_string()));
-        assert!(samples.contains(&"SSP".to_string()));
-        assert!(samples.contains(&"HEC".to_string()));
-    }
-
-    #[test]
-    fn test_get_sample_values_with_limit() {
-        let (_tmp, conn) = setup_db();
-        let samples = get_sample_values(&conn, "Faculté", 2).unwrap();
-        assert_eq!(samples.len(), 2);
     }
 
     #[test]

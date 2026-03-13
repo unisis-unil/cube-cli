@@ -32,28 +32,35 @@ cube <commande> --help
 Le `--help` de chaque commande documente toutes les options, la logique de filtrage
 et donne des exemples. Toujours le consulter en premier.
 
-### 2. Explorer les cubes disponibles
+### 2. Trouver le bon cube (drill-down progressif)
 
+La commande `schema` fonctionne en 3 niveaux de profondeur :
+
+**Niveau 0 — Catalogue compact** (trouver le cube) :
 ```bash
-cube schema
+cube schema                              # liste tous les cubes (nom, description, mesure)
+cube schema --search "réussite"          # filtre par nom ou description
+cube schema --search "réussite|cohorte"  # plusieurs termes (regex)
+cube schema --search "taux.*bachelor"    # pattern regex
 ```
+Retourne un index léger sans dimensions. Utiliser `--search` (regex,
+insensible à la casse et aux accents) pour trouver rapidement le bon cube.
 
-Retourne le catalogue JSON de tous les cubes avec leur description, dimensions,
-mesure et nombre de lignes. Si le cache est vide, exécuter `cube sync` d'abord.
-
-### 3. Inspecter un cube
-
+**Niveau 1 — Dimensions du cube** (comprendre la structure) :
 ```bash
 cube schema <nom_du_cube>
+```
+Retourne les dimensions avec leur type, description, cardinalité et un
+aperçu des valeurs : liste complète triée si ≤ 20 modalités, sinon les
+10 premières et 10 dernières (triées alphabétiquement).
+
+**Niveau 2 — Valeurs d'une dimension** (connaître les modalités) :
+```bash
 cube schema <nom_du_cube> <nom_dimension>
 ```
+Retourne toutes les valeurs distinctes de la dimension.
 
-Le premier niveau donne le schéma complet (dimensions, cardinalités, valeurs ou
-échantillons). Le second niveau liste toutes les valeurs d'une dimension.
-Inspecter le schéma avant de requêter pour utiliser les noms exacts (accents,
-parenthèses, espaces).
-
-### 4. Requêter
+### 3. Requêter
 
 Consulter `cube query --help` et `cube sql --help` pour la syntaxe complète.
 Utiliser `--format json` quand le résultat doit être traité programmatiquement.

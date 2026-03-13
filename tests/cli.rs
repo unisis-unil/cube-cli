@@ -82,10 +82,12 @@ fn test_schema_json_output() {
     assert_eq!(json["row_count"], 8);
     let dims = json["dimensions"].as_array().unwrap();
     assert_eq!(dims.len(), 2); // indicator excluded
-    // Low cardinality dimensions should have "values" not "sample_values"
+    // Level 1: low cardinality (≤ 20) → sorted "values" array
     let fac = &dims[0];
     assert_eq!(fac["name"], "Faculté");
-    assert!(fac.get("values").is_some());
+    assert_eq!(fac["distinct_count"], 3);
+    let values = fac["values"].as_array().unwrap();
+    assert_eq!(values.len(), 3);
 }
 
 #[test]

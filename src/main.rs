@@ -14,13 +14,14 @@ use std::process::ExitCode;
 /// at Université de Lausanne.
 ///
 /// USAGE:
-///     cube schema [<cube> [<dimension>]]
+///     cube schema [--search TERM] [<cube> [<dimension>]]
 ///     cube query <cube> --group-by <dim> [flags]
 ///     cube sql <cube> "SELECT ..."
 ///     cube sync
 ///
 /// EXAMPLES:
 ///     cube schema
+///     cube schema --search "réussite"
 ///     cube schema infrastructures_surface
 ///     cube schema infrastructures_surface "Faculté"
 ///     cube query etudiants_nombre_d_etudiants_plan_principal --group-by Faculté --filter Semestre=2025A
@@ -53,25 +54,35 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Inspect cube metadata (dimensions, columns, row count)
+    /// Progressive drill-down into cube metadata
     ///
-    /// Without arguments, lists all cubes available in the local cache.
-    /// With a cube name, returns the full schema with dimension values
-    /// (complete list when ≤ 50 distinct values, sample otherwise).
-    /// With a cube name and a dimension name, returns all distinct values
-    /// for that dimension.
+    /// Level 0 — no arguments: compact catalogue of all cubes
+    ///     (name, description, measure — no dimensions).
+    /// Level 1 — cube name: dimensions with types, cardinality, and a
+    ///     value preview (full sorted list if ≤ 20, else first/last 10).
+    /// Level 2 — cube + dimension: all distinct values for that dimension.
+    ///
+    /// Use --search to filter the catalogue (level 0) by name or description.
+    /// Supports regex (e.g. --search "réussite|cohorte").
     ///
     /// EXAMPLES:
     ///     cube schema
+    ///     cube schema --search "réussite"
+    ///     cube schema --search "réussite|cohorte"
     ///     cube schema infrastructures_surface
     ///     cube schema infrastructures_surface "Faculté"
     ///     cube schema ./path/to/file.sqlite
+    #[command(verbatim_doc_comment)]
     Schema {
         /// Cube name (e.g. infrastructures_surface) or path to .sqlite file
         name: Option<String>,
 
         /// Dimension name to list all distinct values for
         dimension: Option<String>,
+
+        /// Filter cubes by name or description (level 0 only, supports regex)
+        #[arg(long, value_name = "PATTERN")]
+        search: Option<String>,
     },
 
     /// Query cube data with aggregation
@@ -187,8 +198,8 @@ fn main() -> ExitCode {
     }
 
     let result = match cli.command {
-        Commands::Schema { name, dimension } => {
-            commands::schema::run(name.as_deref(), dimension.as_deref(), dev)
+        Commands::Schema { name, dimension, search } => {
+            commands::schema::run(name.as_deref(), dimension.as_deref(), search.as_deref(), dev)
         }
         Commands::Query {
             file,

@@ -5,8 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::db;
 use crate::error::CubeError;
 
-const VALUES_THRESHOLD: usize = 50;
-const SAMPLE_SIZE: usize = 50;
+const BOUNDARY_SIZE: usize = 10;
 
 pub(crate) fn default_cache_dir(dev: bool) -> Result<PathBuf> {
     let home = dirs::home_dir()
@@ -36,9 +35,9 @@ pub(crate) fn resolve_cube(name: &str, dev: bool) -> Result<PathBuf> {
     )))
 }
 
-pub fn run(name: Option<&str>, dimension: Option<&str>, dev: bool) -> Result<()> {
+pub fn run(name: Option<&str>, dimension: Option<&str>, search: Option<&str>, dev: bool) -> Result<()> {
     match (name, dimension) {
-        (None, _) => list_cubes(dev),
+        (None, _) => list_cubes(search, dev),
         (Some(n), None) => {
             let path = resolve_cube(n, dev)?;
             let schema = build_schema(&path)?;
@@ -87,13 +86,33 @@ fn list_dimension_values(file: &Path, dimension: &str) -> Result<Value> {
     }))
 }
 
-fn list_cubes(dev: bool) -> Result<()> {
+/// Normalize a string for accent-insensitive matching (lowercase + strip combining marks).
+fn normalize_for_search(s: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+    s.nfd()
+        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Level 0: compact catalogue — name, description, measure (no dimensions).
+fn list_cubes(search: Option<&str>, dev: bool) -> Result<()> {
     let cache = default_cache_dir(dev)?;
     if !cache.exists() {
         return Err(CubeError::not_found(
             "Aucun cache local. Exécutez 'cube sync' pour télécharger les cubes.",
         ));
     }
+
+    let search_re = match search {
+        Some(pat) => {
+            let normalized_pat = normalize_for_search(pat);
+            Some(regex::Regex::new(&normalized_pat).map_err(|e| {
+                CubeError::validation(format!("Expression régulière invalide '{pat}': {e}"))
+            })?)
+        }
+        None => None,
+    };
 
     let mut cubes = Vec::new();
     for entry in std::fs::read_dir(&cache)? {
@@ -106,12 +125,24 @@ fn list_cubes(dev: bool) -> Result<()> {
                 .unwrap_or("?")
                 .to_string();
 
-            match build_schema_summary(&path) {
-                Ok(summary) => cubes.push(summary),
+            match build_catalogue_entry(&path) {
+                Ok(entry_val) => {
+                    if let Some(ref re) = search_re {
+                        let haystack = format!(
+                            "{} {} {}",
+                            entry_val["name"].as_str().unwrap_or(""),
+                            entry_val["cube"].as_str().unwrap_or(""),
+                            entry_val["cube_description"].as_str().unwrap_or(""),
+                        );
+                        if !re.is_match(&normalize_for_search(&haystack)) {
+                            continue;
+                        }
+                    }
+                    cubes.push(entry_val);
+                }
                 Err(_) => {
                     cubes.push(json!({
                         "name": name,
-                        "file": path.to_string_lossy(),
                         "error": "Impossible de lire le schéma"
                     }));
                 }
@@ -129,7 +160,8 @@ fn list_cubes(dev: bool) -> Result<()> {
     Ok(())
 }
 
-fn build_schema_summary(file: &Path) -> Result<Value> {
+/// Build a compact catalogue entry for level 0 (no dimensions, no file path).
+fn build_catalogue_entry(file: &Path) -> Result<Value> {
     let conn = db::open(file)?;
     let schema = db::read_metadata_schema(&conn)?;
     let row_count = db::get_row_count(&conn)?;
@@ -140,11 +172,10 @@ fn build_schema_summary(file: &Path) -> Result<Value> {
         .and_then(|v| v.as_str())
         .unwrap_or("indicateur");
 
-    let dimensions: Vec<&str> = columns
+    let dimension_count = columns
         .iter()
         .filter(|c| c.name != indicator_col)
-        .map(|c| c.name.as_str())
-        .collect();
+        .count();
 
     let file_stem = file
         .file_stem()
@@ -154,17 +185,16 @@ fn build_schema_summary(file: &Path) -> Result<Value> {
     Ok(json!({
         "name": file_stem,
         "cube": schema.get("cube").unwrap_or(&Value::Null),
+        "cube_description": schema.get("cube_description").unwrap_or(&Value::Null),
         "measure": schema.get("measure").unwrap_or(&Value::Null),
         "measure_description": schema.get("measure_description").unwrap_or(&Value::Null),
-        "cube_description": schema.get("cube_description").unwrap_or(&Value::Null),
         "aggregation": schema.get("aggregation").unwrap_or(&Value::Null),
         "row_count": row_count,
-        "dimension_count": dimensions.len(),
-        "dimensions": dimensions,
-        "file": file.to_string_lossy(),
+        "dimension_count": dimension_count,
     }))
 }
 
+/// Level 1: cube schema — dimensions with type, description and cardinality (no values).
 pub(crate) fn build_schema(file: &Path) -> Result<Value> {
     let conn = db::open(file)?;
     let mut schema = db::read_metadata_schema(&conn)?;
@@ -190,25 +220,24 @@ pub(crate) fn build_schema(file: &Path) -> Result<Value> {
             continue;
         }
 
-        let col_type_upper = col.col_type.to_uppercase();
         let mut info = json!({
             "name": col.name,
             "type": col.col_type,
         });
 
+        let col_type_upper = col.col_type.to_uppercase();
         if col_type_upper == "TEXT" {
-            let distinct = db::get_distinct_count(&conn, &col.name)?;
+            let values = db::get_all_distinct_values(&conn, &col.name)?;
+            let distinct = values.len();
             info["distinct_count"] = json!(distinct);
 
-            if (distinct as usize) <= VALUES_THRESHOLD {
-                let values = db::get_all_distinct_values(&conn, &col.name)?;
+            if distinct <= BOUNDARY_SIZE * 2 {
                 info["values"] = json!(values);
             } else {
-                let samples = db::get_sample_values(&conn, &col.name, SAMPLE_SIZE)?;
-                info["sample_values"] = json!(samples);
+                info["first_values"] = json!(&values[..BOUNDARY_SIZE]);
+                info["last_values"] = json!(&values[distinct - BOUNDARY_SIZE..]);
             }
         } else {
-            // Numeric columns: provide min, max, distinct_count
             let (min, max, distinct) = db::get_numeric_stats(&conn, &col.name)?;
             info["min"] = json!(min);
             info["max"] = json!(max);
@@ -297,19 +326,21 @@ mod tests {
         // 2 TEXT columns only (indicator excluded)
         assert_eq!(dims.len(), 2);
 
-        // TEXT column with low cardinality → "values" + metadata enrichment
+        // Low cardinality (≤ 20) → sorted "values" array
         let fac = &dims[0];
         assert_eq!(fac["name"], "Faculté");
         assert_eq!(fac["type"], "TEXT");
         assert_eq!(fac["distinct_count"], 2);
         let values = fac["values"].as_array().unwrap();
-        assert_eq!(values.len(), 2);
-        assert!(fac.get("sample_values").is_none() || fac["sample_values"].is_null());
+        assert_eq!(values, &[json!("FBM"), json!("SSP")]);
+        assert!(fac.get("first_values").is_none() || fac["first_values"].is_null());
 
         // Type has a description from metadata
         let typ = &dims[1];
         assert_eq!(typ["name"], "Type");
         assert_eq!(typ["description"], "Type de surface");
+        let type_values = typ["values"].as_array().unwrap();
+        assert_eq!(type_values, &[json!("Bureau"), json!("Labo")]);
     }
 
     #[test]
@@ -324,12 +355,14 @@ mod tests {
     }
 
     #[test]
-    fn test_build_schema_summary() {
+    fn test_build_catalogue_entry() {
         let tmp = create_test_db();
-        let summary = build_schema_summary(tmp.path()).unwrap();
-        assert_eq!(summary["cube"], "Infrastructures");
-        assert_eq!(summary["row_count"], 3);
-        assert_eq!(summary["dimension_count"], 2);
+        let entry = build_catalogue_entry(tmp.path()).unwrap();
+        assert_eq!(entry["cube"], "Infrastructures");
+        assert_eq!(entry["row_count"], 3);
+        assert_eq!(entry["dimension_count"], 2);
+        // Level 0: no dimensions list
+        assert!(entry.get("dimensions").is_none());
     }
 
     #[test]
@@ -374,25 +407,25 @@ mod tests {
     #[test]
     fn test_run_with_file() {
         let tmp = create_test_db();
-        assert!(run(Some(tmp.path().to_str().unwrap()), None, false).is_ok());
+        assert!(run(Some(tmp.path().to_str().unwrap()), None, None, false).is_ok());
     }
 
     #[test]
     fn test_run_with_dimension() {
         let tmp = create_test_db();
-        assert!(run(Some(tmp.path().to_str().unwrap()), Some("Faculté"), false).is_ok());
+        assert!(run(Some(tmp.path().to_str().unwrap()), Some("Faculté"), None, false).is_ok());
     }
 
     #[test]
     fn test_run_nonexistent_file() {
-        let result = run(Some("/nonexistent.sqlite"), None, false);
+        let result = run(Some("/nonexistent.sqlite"), None, None, false);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_run_nonexistent_dimension() {
         let tmp = create_test_db();
-        let result = run(Some(tmp.path().to_str().unwrap()), Some("Nope"), false);
+        let result = run(Some(tmp.path().to_str().unwrap()), Some("Nope"), None, false);
         assert!(result.is_err());
     }
 
@@ -450,15 +483,100 @@ mod tests {
     }
 
     #[test]
-    fn test_build_schema_summary_includes_numeric_dimensions() {
+    fn test_build_catalogue_entry_includes_numeric_dimensions_in_count() {
         let tmp = create_mixed_type_db();
-        let summary = build_schema_summary(tmp.path()).unwrap();
-        assert_eq!(summary["dimension_count"], 4);
-        let dims = summary["dimensions"].as_array().unwrap();
-        let names: Vec<&str> = dims.iter().map(|d| d.as_str().unwrap()).collect();
-        assert!(names.contains(&"Age"));
-        assert!(names.contains(&"Année civile"));
-        assert!(names.contains(&"Taux de contrat"));
-        assert!(!names.contains(&"indicateur"));
+        let entry = build_catalogue_entry(tmp.path()).unwrap();
+        assert_eq!(entry["dimension_count"], 4);
+        // Level 0: no dimensions list, only count
+        assert!(entry.get("dimensions").is_none());
+    }
+
+    fn create_high_cardinality_db() -> tempfile::NamedTempFile {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO metadata VALUES ('schema', '{
+                 "cube": "HighCard",
+                 "measure": "Count",
+                 "indicator_column": "indicateur",
+                 "aggregation": "SUM",
+                 "dimensions": []
+             }');
+             CREATE TABLE data (
+                 "Code" TEXT,
+                 indicateur REAL
+             );"#,
+        )
+        .unwrap();
+        // Insert 25 distinct sorted values: V01..V25
+        for i in 1..=25 {
+            conn.execute(
+                "INSERT INTO data VALUES (?1, 1.0)",
+                [format!("V{:02}", i)],
+            )
+            .unwrap();
+        }
+        tmp
+    }
+
+    #[test]
+    fn test_build_schema_high_cardinality_first_last() {
+        let tmp = create_high_cardinality_db();
+        let schema = build_schema(tmp.path()).unwrap();
+        let dims = schema["dimensions"].as_array().unwrap();
+        assert_eq!(dims.len(), 1);
+
+        let code = &dims[0];
+        assert_eq!(code["name"], "Code");
+        assert_eq!(code["distinct_count"], 25);
+        // > 20 → no "values", instead "first_values" and "last_values"
+        assert!(code.get("values").is_none() || code["values"].is_null());
+
+        let first = code["first_values"].as_array().unwrap();
+        assert_eq!(first.len(), 10);
+        assert_eq!(first[0], "V01");
+        assert_eq!(first[9], "V10");
+
+        let last = code["last_values"].as_array().unwrap();
+        assert_eq!(last.len(), 10);
+        assert_eq!(last[0], "V16");
+        assert_eq!(last[9], "V25");
+    }
+
+    #[test]
+    fn test_build_schema_boundary_20_values_shows_all() {
+        // Exactly 20 values → should show "values", not first/last
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO metadata VALUES ('schema', '{
+                 "cube": "Boundary",
+                 "measure": "Count",
+                 "indicator_column": "indicateur",
+                 "aggregation": "SUM",
+                 "dimensions": []
+             }');
+             CREATE TABLE data ("Code" TEXT, indicateur REAL);"#,
+        )
+        .unwrap();
+        for i in 1..=20 {
+            conn.execute("INSERT INTO data VALUES (?1, 1.0)", [format!("V{:02}", i)])
+                .unwrap();
+        }
+
+        let schema = build_schema(tmp.path()).unwrap();
+        let code = &schema["dimensions"].as_array().unwrap()[0];
+        assert_eq!(code["distinct_count"], 20);
+        assert!(code["values"].as_array().is_some());
+        assert!(code.get("first_values").is_none() || code["first_values"].is_null());
+    }
+
+    #[test]
+    fn test_normalize_for_search() {
+        assert_eq!(normalize_for_search("Réussite"), "reussite");
+        assert_eq!(normalize_for_search("étudiants"), "etudiants");
+        assert_eq!(normalize_for_search("BACHELOR"), "bachelor");
     }
 }

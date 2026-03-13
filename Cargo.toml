@@ -20,6 +20,8 @@ console = "0.15"
 crc32c = "0.6"
 base64 = "0.22"
 urlencoding = "2"
+unicode-normalization = "0.1"
+regex = "1"
 
 [dev-dependencies]
 assert_cmd = "2"
