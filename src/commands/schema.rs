@@ -246,11 +246,11 @@ pub(crate) fn build_schema(file: &Path) -> Result<Value> {
         // Enrich with description and parent from metadata
         if let Some(meta) = meta_dims.iter().find(|d| d["name"] == col.name) {
             let desc = meta.get("description").unwrap_or(&Value::Null);
-            if !desc.is_null() && desc.as_object().map_or(true, |o| !o.is_empty()) {
+            if !desc.is_null() && desc.as_object().is_none_or(|o| !o.is_empty()) {
                 info["description"] = desc.clone();
             }
             let parent = meta.get("parent").unwrap_or(&Value::Null);
-            if !parent.is_null() && parent.as_object().map_or(true, |o| !o.is_empty()) {
+            if !parent.is_null() && parent.as_object().is_none_or(|o| !o.is_empty()) {
                 info["parent"] = parent.clone();
             }
         }
