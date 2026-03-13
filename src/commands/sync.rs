@@ -177,6 +177,26 @@ fn local_crc32c_b64(path: &Path) -> Result<String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
+// ── SQLite integrity ────────────────────────────────────────────────
+
+/// Quick integrity check: open the file, verify the schema metadata is readable.
+fn sqlite_integrity_ok(path: &Path) -> bool {
+    let conn = match rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    // Check that SQLite can read the file and the metadata table exists
+    conn.query_row(
+        "SELECT value FROM metadata WHERE key = 'schema'",
+        [],
+        |row| row.get::<_, String>(0),
+    )
+    .is_ok()
+}
+
 // ── Download ────────────────────────────────────────────────────────
 
 fn download_object(
@@ -406,6 +426,32 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
             bail!(e);
         }
 
+        // Verify CRC32C matches the remote object
+        if let Ok(local_hash) = local_crc32c_b64(&tmp_path) {
+            if local_hash != obj.crc32c {
+                let _ = std::fs::remove_file(&tmp_path);
+                file_pb.set_style(style_done());
+                file_pb.finish_with_message(format!(
+                    "{} hash incorrect, ignoré",
+                    style("✗").yellow()
+                ));
+                overall.inc(1);
+                continue;
+            }
+        }
+
+        // Verify SQLite integrity before accepting the file
+        if !sqlite_integrity_ok(&tmp_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            file_pb.set_style(style_done());
+            file_pb.finish_with_message(format!(
+                "{} corrompu, ignoré",
+                style("✗").yellow()
+            ));
+            overall.inc(1);
+            continue;
+        }
+
         std::fs::rename(&tmp_path, &local_path)?;
 
         file_pb.set_style(style_done());
@@ -511,6 +557,39 @@ mod tests {
         let hash = local_crc32c_b64(&path).unwrap();
         // crc32c("hello world") = 0xc99465aa → base64 = "yZRlqg=="
         assert_eq!(hash, "yZRlqg==");
+    }
+
+    #[test]
+    fn test_sqlite_integrity_ok_valid() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("valid.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO metadata VALUES ('schema', '{\"cube\": \"Test\"}');
+             CREATE TABLE data (x TEXT, indicateur REAL);",
+        )
+        .unwrap();
+        drop(conn);
+        assert!(sqlite_integrity_ok(&path));
+    }
+
+    #[test]
+    fn test_sqlite_integrity_ok_corrupted() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bad.sqlite");
+        std::fs::write(&path, b"this is not a sqlite file").unwrap();
+        assert!(!sqlite_integrity_ok(&path));
+    }
+
+    #[test]
+    fn test_sqlite_integrity_ok_missing_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("no_meta.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE data (x TEXT);").unwrap();
+        drop(conn);
+        assert!(!sqlite_integrity_ok(&path));
     }
 
     #[test]
