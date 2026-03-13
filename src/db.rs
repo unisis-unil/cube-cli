@@ -63,7 +63,10 @@ pub fn get_row_count(conn: &Connection) -> Result<i64> {
     Ok(count)
 }
 
-pub fn get_numeric_stats(conn: &Connection, column: &str) -> Result<(Option<f64>, Option<f64>, i64)> {
+pub fn get_numeric_stats(
+    conn: &Connection,
+    column: &str,
+) -> Result<(Option<f64>, Option<f64>, i64)> {
     let (min, max, distinct): (Option<f64>, Option<f64>, i64) = conn.query_row(
         &format!(
             "SELECT MIN(\"{0}\"), MAX(\"{0}\"), COUNT(DISTINCT \"{0}\") FROM data WHERE \"{0}\" IS NOT NULL",

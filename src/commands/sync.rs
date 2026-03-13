@@ -686,29 +686,16 @@ fn verify_cubes(cache: &Path, key: Option<&str>) -> Result<()> {
     let mut fail_count = 0u32;
 
     for path in &cubes {
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("?");
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
 
         match verify_single_cube(path, key) {
             Ok(row_count) => {
                 ok_count += 1;
-                eprintln!(
-                    "  {} {} ({} lignes)",
-                    style("✓").green(),
-                    name,
-                    row_count
-                );
+                eprintln!("  {} {} ({} lignes)", style("✓").green(), name, row_count);
             }
             Err(e) => {
                 fail_count += 1;
-                eprintln!(
-                    "  {} {} : {}",
-                    style("✗").red(),
-                    name,
-                    e
-                );
+                eprintln!("  {} {} : {}", style("✗").red(), name, e);
             }
         }
     }
@@ -737,19 +724,17 @@ fn verify_single_cube(path: &Path, key: Option<&str>) -> Result<i64> {
     let conn = crate::db::open_with_key(path, key)?;
 
     // Check metadata schema is readable
-    crate::db::read_metadata_schema(&conn)
-        .context("Schéma métadonnées illisible")?;
+    crate::db::read_metadata_schema(&conn).context("Schéma métadonnées illisible")?;
 
     // Check data table exists and has columns
-    let columns = crate::db::get_table_columns(&conn, "data")
-        .context("Table 'data' inaccessible")?;
+    let columns =
+        crate::db::get_table_columns(&conn, "data").context("Table 'data' inaccessible")?;
     if columns.is_empty() {
         bail!("Table 'data' sans colonnes");
     }
 
     // Check row count
-    let row_count = crate::db::get_row_count(&conn)
-        .context("Impossible de compter les lignes")?;
+    let row_count = crate::db::get_row_count(&conn).context("Impossible de compter les lignes")?;
 
     Ok(row_count)
 }
