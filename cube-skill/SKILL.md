@@ -7,6 +7,7 @@ description: >
   mentionne « cube », « S3 » (statistiques en self-service), ou demande des chiffres
   issus du datawarehouse UNISIS. Utiliser aussi quand l'utilisateur veut synchroniser,
   explorer ou interroger des cubes SQLite UNISIS.
+user-invocable: true
 ---
 
 # cube — CLI de requêtage du datawarehouse UNISIS
@@ -62,5 +63,14 @@ Retourne toutes les valeurs distinctes de la dimension.
 
 ### 3. Requêter
 
-Consulter `cube query --help` et `cube sql --help` pour la syntaxe complète.
+**Toujours utiliser `cube query` en priorité.** Ses flags structurés (`--group-by`,
+`--filter`, `--exclude`, `--arrange`, `--limit`) garantissent des requêtes correctes :
+le quoting des identifiants accentués, l'agrégation et les noms de colonnes sont
+gérés automatiquement, ce qui élimine toute une catégorie d'erreurs courantes avec
+du SQL écrit à la main.
+
+Ne recourir à `cube sql` qu'en dernier ressort, pour les requêtes impossibles à
+exprimer avec les flags (sous-requêtes, CASE, HAVING, jointures entre cubes).
+
+Consulter `cube query --help` pour la syntaxe complète.
 Utiliser `--format json` quand le résultat doit être traité programmatiquement.

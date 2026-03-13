@@ -85,7 +85,15 @@ enum Commands {
         search: Option<String>,
     },
 
-    /// Query cube data with aggregation
+    /// Query cube data with aggregation (PREFERRED over 'cube sql')
+    ///
+    /// Always prefer 'cube query' over 'cube sql'. The structured flags
+    /// guarantee correct quoting, aggregation and column names — eliminating
+    /// a whole class of errors that hand-written SQL is prone to (wrong
+    /// column names, missing quotes on accented identifiers, incorrect
+    /// GROUP BY clauses, etc.). Reserve 'cube sql' only for queries that
+    /// cannot be expressed with the flags below (e.g. sub-queries, CASE
+    /// expressions, joins across cubes).
     ///
     /// Builds a SQL query with SUM aggregation on the indicator column,
     /// applying filters, grouping, sorting and limiting as specified.
@@ -152,6 +160,11 @@ enum Commands {
     },
 
     /// Execute arbitrary SQL against the cube file
+    ///
+    /// WARNING: Prefer 'cube query' whenever possible. The structured query
+    /// interface handles quoting, aggregation and column names automatically,
+    /// which prevents errors. Use 'cube sql' only when 'cube query' cannot
+    /// express the needed logic (e.g. sub-queries, CASE, HAVING, joins).
     Sql {
         /// Cube name or path to .sqlite file
         file: PathBuf,
