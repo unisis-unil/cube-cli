@@ -506,7 +506,7 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
         overall.set_message(display_name.to_string());
 
         // Skip if local file exists and remote CRC32C hasn't changed (stored in metadata)
-        if !force && local_path.exists() {
+        if local_path.exists() {
             if let Some(stored_crc) = meta.file_checksums.get(local_filename) {
                 if *stored_crc == obj.crc32c {
                     let done_pb = mp.add(ProgressBar::new(0));
