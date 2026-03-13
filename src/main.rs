@@ -217,6 +217,18 @@ fn cache_is_empty(dev: bool) -> bool {
         .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sqlite"))
 }
 
+/// Returns true if the command uses a direct file path rather than a cube name
+/// (i.e. the argument contains a path separator or has a file extension).
+fn uses_direct_path(command: &Commands) -> bool {
+    let name = match command {
+        Commands::Query { file, .. } => file.to_str().unwrap_or_default().to_string(),
+        Commands::Sql { file, .. } => file.to_str().unwrap_or_default().to_string(),
+        Commands::Schema { name: Some(n), .. } => n.clone(),
+        _ => return false,
+    };
+    name.contains('/') || name.contains('\\') || std::path::Path::new(&name).extension().is_some()
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -239,8 +251,8 @@ fn main() -> ExitCode {
     if !is_sync {
         commands::sync::check_for_updates(dev);
 
-        // If the cache is empty, offer to sync first
-        if cache_is_empty(dev) {
+        // If the cache is empty and the command needs it, offer to sync first
+        if !uses_direct_path(&command) && cache_is_empty(dev) {
             let sync_cmd = if dev { "cube --dev sync" } else { "cube sync" };
             if std::io::stderr().is_terminal() {
                 eprintln!("Aucun cube en cache. Lancement de la synchronisation...\n");
