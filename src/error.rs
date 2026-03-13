@@ -26,6 +26,15 @@ impl CubeError {
         }
         .into()
     }
+
+    pub fn unavailable(message: impl Into<String>) -> anyhow::Error {
+        CubeError {
+            code: 503,
+            message: message.into(),
+            reason: "exportInProgress".to_string(),
+        }
+        .into()
+    }
 }
 
 impl fmt::Display for CubeError {

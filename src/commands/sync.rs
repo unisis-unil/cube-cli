@@ -80,8 +80,6 @@ fn get_access_token() -> Result<String> {
 struct GcsListResponse {
     #[serde(default)]
     prefixes: Vec<String>,
-    #[serde(default)]
-    items: Vec<GcsObject>,
     #[serde(rename = "nextPageToken")]
     next_page_token: Option<String>,
 }
@@ -129,34 +127,90 @@ fn gcs_list_prefixes(client: &Client, token: &str, bucket: &str, prefix: &str) -
     Ok(all_prefixes)
 }
 
-/// List all objects under a prefix.
-fn gcs_list_objects(client: &Client, token: &str, bucket: &str, prefix: &str) -> Result<Vec<GcsObject>> {
-    let mut all_items = Vec::new();
-    let mut page_token: Option<String> = None;
+// ── Manifest ────────────────────────────────────────────────────────
 
-    loop {
-        let mut req = client
-            .get(format!("{GCS_API}/b/{bucket}/o"))
-            .bearer_auth(token)
-            .query(&[("prefix", prefix)]);
+const MANIFEST_FILE: &str = "manifest.json";
 
-        if let Some(ref pt) = page_token {
-            req = req.query(&[("pageToken", pt.as_str())]);
-        }
+#[derive(Deserialize, Clone)]
+struct Manifest {
+    files: Vec<ManifestFile>,
+}
 
-        let resp: GcsListResponse = req.send()?.error_for_status()?.json()?;
-        all_items.extend(resp.items);
+#[derive(Deserialize, Clone)]
+struct ManifestFile {
+    name: String,
+    crc32c: String,
+    #[serde(deserialize_with = "deserialize_string_u64")]
+    size: u64,
+}
 
-        match resp.next_page_token {
-            Some(pt) => page_token = Some(pt),
-            None => break,
+/// Fetch manifest.json from a snapshot prefix. Returns None if the file doesn't exist (export in progress).
+fn fetch_manifest(
+    client: &Client,
+    token: &str,
+    bucket: &str,
+    prefix: &str,
+) -> Result<Option<Manifest>> {
+    let object_name = format!("{prefix}{MANIFEST_FILE}");
+    let encoded = urlencoding::encode(&object_name);
+    let url = format!("{GCS_API}/b/{bucket}/o/{encoded}?alt=media");
+
+    let resp = client.get(&url).bearer_auth(token).send()?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+
+    let manifest: Manifest = resp.error_for_status()?.json()?;
+    Ok(Some(manifest))
+}
+
+/// Find the latest timestamp directory under prefix that has a manifest.
+/// Returns (timestamp, manifest). If the most recent snapshot has no manifest,
+/// warns about an export in progress and falls back to the previous one.
+fn find_latest_ready_snapshot(
+    client: &Client,
+    token: &str,
+    bucket: &str,
+    prefix: &str,
+) -> Result<Option<(String, Manifest)>> {
+    let prefixes = gcs_list_prefixes(client, token, bucket, prefix)?;
+
+    if prefixes.is_empty() {
+        bail!("Aucun répertoire trouvé sous gs://{bucket}/{prefix}");
+    }
+
+    let mut sorted: Vec<&String> = prefixes.iter().collect();
+    sorted.sort();
+    sorted.reverse(); // most recent first
+
+    for (i, p) in sorted.iter().enumerate() {
+        let ts = p.trim_end_matches('/').rsplit('/').next().unwrap_or(p);
+        let snapshot_prefix = format!("{prefix}{ts}/");
+
+        match fetch_manifest(client, token, bucket, &snapshot_prefix)? {
+            Some(manifest) => {
+                if i > 0 {
+                    eprintln!(
+                        "{} Un export semble en cours (snapshot sans manifeste ignoré). \
+                         Utilisation du dernier snapshot complet : {ts}",
+                        style("⚠").yellow()
+                    );
+                }
+                return Ok(Some((ts.to_string(), manifest)));
+            }
+            None => {
+                eprintln!(
+                    "  Snapshot {ts} : pas de manifeste (export en cours ou échoué)."
+                );
+            }
         }
     }
 
-    Ok(all_items)
+    Ok(None)
 }
 
-/// Find the latest timestamp directory under prefix.
+/// Find the latest timestamp directory under prefix (without manifest check).
 fn find_latest_timestamp(client: &Client, token: &str, bucket: &str, prefix: &str) -> Result<String> {
     let prefixes = gcs_list_prefixes(client, token, bucket, prefix)?;
 
@@ -356,10 +410,17 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     let token = get_access_token()?;
     let client = Client::new();
 
-    eprintln!("Recherche du dernier snapshot sur gs://{bucket}/{prefix} ...");
-    let remote_ts = find_latest_timestamp(&client, &token, bucket, prefix)?;
+    eprintln!("Recherche du dernier snapshot complet sur gs://{bucket}/{prefix} ...");
+    let (remote_ts, manifest) = match find_latest_ready_snapshot(&client, &token, bucket, prefix)? {
+        Some(result) => result,
+        None => {
+            return Err(crate::error::CubeError::unavailable(
+                "Aucun snapshot complet trouvé (aucun manifeste disponible). \
+                 Un export est peut-être en cours. Réessayez plus tard."
+            ));
+        }
+    };
     let remote_prefix = format!("{prefix}{remote_ts}/");
-    eprintln!("Snapshot le plus récent : {remote_ts}");
 
     if !force && meta.remote_timestamp == remote_ts {
         eprintln!("Le cache est à jour (timestamp: {remote_ts}).");
@@ -378,16 +439,25 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
         );
     }
 
-    // List all .sqlite.gz objects in the latest snapshot
-    let objects = gcs_list_objects(&client, &token, bucket, &remote_prefix)?;
-    let sqlite_objects: Vec<GcsObject> = objects
-        .into_iter()
-        .filter(|o| o.name.ends_with(".sqlite.gz"))
+    let sqlite_objects: Vec<GcsObject> = manifest
+        .files
+        .iter()
+        .filter(|f| f.name.ends_with(".sqlite.gz"))
+        .map(|f| GcsObject {
+            name: format!("{remote_prefix}{}", f.name),
+            size: f.size,
+            crc32c: f.crc32c.clone(),
+        })
         .collect();
 
     if sqlite_objects.is_empty() {
-        bail!("Aucun fichier .sqlite.gz trouvé dans gs://{bucket}/{remote_prefix}");
+        bail!("Aucun fichier .sqlite.gz dans le manifeste de gs://{bucket}/{remote_prefix}");
     }
+
+    eprintln!(
+        "Manifeste OK — {} cube(s) attendu(s).",
+        sqlite_objects.len()
+    );
 
     // Set up multi-progress display
     let mp = MultiProgress::new();
@@ -715,5 +785,51 @@ mod tests {
         let meta = read_sync_metadata(tmp.path());
         assert_eq!(meta.remote_timestamp, "ts1");
         assert!(meta.file_checksums.is_empty());
+    }
+
+    #[test]
+    fn test_manifest_deserialization() {
+        let json = r#"{
+            "files": [
+                {"name": "cube_a.sqlite.gz", "crc32c": "abc123==", "size": "12345"},
+                {"name": "cube_b.sqlite.gz", "crc32c": "def456==", "size": "67890"}
+            ]
+        }"#;
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.files.len(), 2);
+        assert_eq!(manifest.files[0].name, "cube_a.sqlite.gz");
+        assert_eq!(manifest.files[0].crc32c, "abc123==");
+        assert_eq!(manifest.files[0].size, 12345);
+        assert_eq!(manifest.files[1].name, "cube_b.sqlite.gz");
+        assert_eq!(manifest.files[1].size, 67890);
+    }
+
+    #[test]
+    fn test_manifest_to_gcs_objects() {
+        let json = r#"{
+            "files": [
+                {"name": "cube_a.sqlite.gz", "crc32c": "abc==", "size": "100"},
+                {"name": "cube_b.sqlite.gz", "crc32c": "def==", "size": "200"},
+                {"name": "other.txt", "crc32c": "ghi==", "size": "50"}
+            ]
+        }"#;
+        let manifest: Manifest = serde_json::from_str(json).unwrap();
+        let prefix = "cubes/2026-03-13T120000/";
+
+        let objects: Vec<GcsObject> = manifest
+            .files
+            .iter()
+            .filter(|f| f.name.ends_with(".sqlite.gz"))
+            .map(|f| GcsObject {
+                name: format!("{prefix}{}", f.name),
+                size: f.size,
+                crc32c: f.crc32c.clone(),
+            })
+            .collect();
+
+        assert_eq!(objects.len(), 2);
+        assert_eq!(objects[0].name, "cubes/2026-03-13T120000/cube_a.sqlite.gz");
+        assert_eq!(objects[0].crc32c, "abc==");
+        assert_eq!(objects[1].size, 200);
     }
 }
