@@ -116,6 +116,7 @@ fn normalize_for_search(s: &str) -> String {
 }
 
 /// Level 0: compact catalogue — name, description, measure (no dimensions).
+/// Uses the cached catalogue built during sync when available.
 fn list_cubes(search: Option<&str>, dev: bool, key: Option<&str>) -> Result<()> {
     let cache = default_cache_dir(dev)?;
     if !cache.exists() {
@@ -134,8 +135,40 @@ fn list_cubes(search: Option<&str>, dev: bool, key: Option<&str>) -> Result<()> 
         None => None,
     };
 
+    // Try reading the cached catalogue first
+    let mut cubes = read_catalogue_cache(&cache, key)?;
+
+    // Apply search filter
+    if let Some(ref re) = search_re {
+        cubes.retain(|entry| {
+            let haystack = format!(
+                "{} {} {}",
+                entry["name"].as_str().unwrap_or(""),
+                entry["cube"].as_str().unwrap_or(""),
+                entry["cube_description"].as_str().unwrap_or(""),
+            );
+            re.is_match(&normalize_for_search(&haystack))
+        });
+    }
+
+    println!("{}", serde_json::to_string_pretty(&cubes)?);
+    Ok(())
+}
+
+/// Read the catalogue from the cache file, or rebuild it by opening each cube.
+fn read_catalogue_cache(cache: &std::path::Path, key: Option<&str>) -> Result<Vec<Value>> {
+    let catalogue_path = cache.join(super::sync::CATALOGUE_FILE);
+
+    if catalogue_path.exists() {
+        let data = std::fs::read_to_string(&catalogue_path)?;
+        if let Ok(cubes) = serde_json::from_str::<Vec<Value>>(&data) {
+            return Ok(cubes);
+        }
+    }
+
+    // Fallback: build catalogue by opening each cube (slow with encryption)
     let mut cubes = Vec::new();
-    for entry in std::fs::read_dir(&cache)? {
+    for entry in std::fs::read_dir(cache)? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("sqlite") {
@@ -146,20 +179,7 @@ fn list_cubes(search: Option<&str>, dev: bool, key: Option<&str>) -> Result<()> 
                 .to_string();
 
             match build_catalogue_entry(&path, key) {
-                Ok(entry_val) => {
-                    if let Some(ref re) = search_re {
-                        let haystack = format!(
-                            "{} {} {}",
-                            entry_val["name"].as_str().unwrap_or(""),
-                            entry_val["cube"].as_str().unwrap_or(""),
-                            entry_val["cube_description"].as_str().unwrap_or(""),
-                        );
-                        if !re.is_match(&normalize_for_search(&haystack)) {
-                            continue;
-                        }
-                    }
-                    cubes.push(entry_val);
-                }
+                Ok(entry_val) => cubes.push(entry_val),
                 Err(_) => {
                     cubes.push(json!({
                         "name": name,
@@ -176,8 +196,11 @@ fn list_cubes(search: Option<&str>, dev: bool, key: Option<&str>) -> Result<()> 
         na.cmp(nb)
     });
 
-    println!("{}", serde_json::to_string_pretty(&cubes)?);
-    Ok(())
+    // Persist the rebuilt catalogue for next time
+    let json = serde_json::to_string_pretty(&cubes)?;
+    let _ = std::fs::write(&catalogue_path, json);
+
+    Ok(cubes)
 }
 
 /// Build a compact catalogue entry for level 0 (no dimensions, no file path).

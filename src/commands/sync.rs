@@ -668,6 +668,8 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
 
 // ── Post-sync verification ──────────────────────────────────────────
 
+pub(crate) const CATALOGUE_FILE: &str = ".catalogue.json";
+
 fn verify_cubes(cache: &Path, key: Option<&str>) -> Result<()> {
     let mut cubes: Vec<std::path::PathBuf> = std::fs::read_dir(cache)?
         .flatten()
@@ -684,14 +686,16 @@ fn verify_cubes(cache: &Path, key: Option<&str>) -> Result<()> {
 
     let mut ok_count = 0u32;
     let mut fail_count = 0u32;
+    let mut catalogue = Vec::new();
 
     for path in &cubes {
         let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
 
-        match verify_single_cube(path, key) {
-            Ok(row_count) => {
+        match verify_and_catalogue_cube(path, key) {
+            Ok((row_count, entry)) => {
                 ok_count += 1;
                 eprintln!("  {} {} ({} lignes)", style("✓").green(), name, row_count);
+                catalogue.push(entry);
             }
             Err(e) => {
                 fail_count += 1;
@@ -699,6 +703,16 @@ fn verify_cubes(cache: &Path, key: Option<&str>) -> Result<()> {
             }
         }
     }
+
+    // Write catalogue cache
+    catalogue.sort_by(|a, b| {
+        let na = a["name"].as_str().unwrap_or("");
+        let nb = b["name"].as_str().unwrap_or("");
+        na.cmp(nb)
+    });
+    let catalogue_path = cache.join(CATALOGUE_FILE);
+    let json = serde_json::to_string_pretty(&catalogue)?;
+    std::fs::write(&catalogue_path, json)?;
 
     eprintln!(
         "\n{} Vérification : {ok_count} OK, {fail_count} en erreur sur {} cube(s).",
@@ -719,24 +733,40 @@ fn verify_cubes(cache: &Path, key: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Verify a single cube: open with key, read schema metadata, check data table.
-fn verify_single_cube(path: &Path, key: Option<&str>) -> Result<i64> {
+/// Verify a single cube and build its catalogue entry.
+fn verify_and_catalogue_cube(path: &Path, key: Option<&str>) -> Result<(i64, serde_json::Value)> {
     let conn = crate::db::open_with_key(path, key)?;
 
-    // Check metadata schema is readable
-    crate::db::read_metadata_schema(&conn).context("Schéma métadonnées illisible")?;
+    let schema = crate::db::read_metadata_schema(&conn).context("Schéma métadonnées illisible")?;
 
-    // Check data table exists and has columns
     let columns =
         crate::db::get_table_columns(&conn, "data").context("Table 'data' inaccessible")?;
     if columns.is_empty() {
         bail!("Table 'data' sans colonnes");
     }
 
-    // Check row count
     let row_count = crate::db::get_row_count(&conn).context("Impossible de compter les lignes")?;
 
-    Ok(row_count)
+    let indicator_col = schema
+        .get("indicator_column")
+        .and_then(|v| v.as_str())
+        .unwrap_or("indicateur");
+    let dimension_count = columns.iter().filter(|c| c.name != indicator_col).count();
+
+    let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+
+    let entry = serde_json::json!({
+        "name": file_stem,
+        "cube": schema.get("cube").unwrap_or(&serde_json::Value::Null),
+        "cube_description": schema.get("cube_description").unwrap_or(&serde_json::Value::Null),
+        "measure": schema.get("measure").unwrap_or(&serde_json::Value::Null),
+        "measure_description": schema.get("measure_description").unwrap_or(&serde_json::Value::Null),
+        "aggregation": schema.get("aggregation").unwrap_or(&serde_json::Value::Null),
+        "row_count": row_count,
+        "dimension_count": dimension_count,
+    });
+
+    Ok((row_count, entry))
 }
 
 #[cfg(test)]
@@ -955,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_single_cube_valid() {
+    fn test_verify_and_catalogue_cube_valid() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("test.sqlite");
         let conn = rusqlite::Connection::open(&path).unwrap();
@@ -969,23 +999,26 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let row_count = verify_single_cube(&path, None).unwrap();
+        let (row_count, entry) = verify_and_catalogue_cube(&path, None).unwrap();
         assert_eq!(row_count, 2);
+        assert_eq!(entry["name"], "test");
+        assert_eq!(entry["cube"], "Test");
+        assert_eq!(entry["dimension_count"], 1);
     }
 
     #[test]
-    fn test_verify_single_cube_no_metadata() {
+    fn test_verify_and_catalogue_cube_no_metadata() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("no_meta.sqlite");
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch("CREATE TABLE data (x TEXT);").unwrap();
         drop(conn);
 
-        assert!(verify_single_cube(&path, None).is_err());
+        assert!(verify_and_catalogue_cube(&path, None).is_err());
     }
 
     #[test]
-    fn test_verify_single_cube_no_data_table() {
+    fn test_verify_and_catalogue_cube_no_data_table() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("no_data.sqlite");
         let conn = rusqlite::Connection::open(&path).unwrap();
@@ -996,16 +1029,16 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        assert!(verify_single_cube(&path, None).is_err());
+        assert!(verify_and_catalogue_cube(&path, None).is_err());
     }
 
     #[test]
-    fn test_verify_single_cube_corrupted() {
+    fn test_verify_and_catalogue_cube_corrupted() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("corrupt.sqlite");
         std::fs::write(&path, b"not a database").unwrap();
 
-        assert!(verify_single_cube(&path, None).is_err());
+        assert!(verify_and_catalogue_cube(&path, None).is_err());
     }
 
     #[test]
