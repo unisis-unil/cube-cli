@@ -37,7 +37,10 @@ pub(crate) fn parse_filters(raw: &[String]) -> Result<Vec<Filter>> {
         .into_iter()
         .map(|col| {
             let values = map.remove(&col).unwrap();
-            Filter { column: col, values }
+            Filter {
+                column: col,
+                values,
+            }
         })
         .collect())
 }
@@ -50,22 +53,26 @@ pub(crate) fn build_where_clause(
     let mut clauses = Vec::new();
 
     for f in includes {
-        let placeholders: Vec<String> = f.values.iter().map(|v| {
-            params.push(v.clone());
-            "?".to_string()
-        }).collect();
-        clauses.push(format!(
-            "\"{}\" IN ({})",
-            f.column,
-            placeholders.join(", ")
-        ));
+        let placeholders: Vec<String> = f
+            .values
+            .iter()
+            .map(|v| {
+                params.push(v.clone());
+                "?".to_string()
+            })
+            .collect();
+        clauses.push(format!("\"{}\" IN ({})", f.column, placeholders.join(", ")));
     }
 
     for f in excludes {
-        let placeholders: Vec<String> = f.values.iter().map(|v| {
-            params.push(v.clone());
-            "?".to_string()
-        }).collect();
+        let placeholders: Vec<String> = f
+            .values
+            .iter()
+            .map(|v| {
+                params.push(v.clone());
+                "?".to_string()
+            })
+            .collect();
         clauses.push(format!(
             "\"{}\" NOT IN ({})",
             f.column,
@@ -147,7 +154,8 @@ pub fn run(
         let select_cols = if select_flat.is_empty() {
             // Exclude the indicator column by default in no-aggregate mode
             let cols = db::get_table_columns(&conn, "data")?;
-            let dim_cols: Vec<String> = cols.into_iter()
+            let dim_cols: Vec<String> = cols
+                .into_iter()
                 .filter(|c| c.name != indicator)
                 .map(|c| format!("\"{}\"", c.name))
                 .collect();
@@ -157,7 +165,11 @@ pub fn run(
                 dim_cols.join(", ")
             }
         } else {
-            select_flat.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(", ")
+            select_flat
+                .iter()
+                .map(|c| format!("\"{}\"", c))
+                .collect::<Vec<_>>()
+                .join(", ")
         };
         let mut q = format!("SELECT {select_cols} FROM data{where_clause}");
         if !arrange_flat.is_empty() {
@@ -182,7 +194,10 @@ pub fn run(
         let select_parts: Vec<String> = select_cols
             .iter()
             .map(|c| format!("\"{}\"", c))
-            .chain(std::iter::once(format!("SUM(\"{}\") AS \"{}\"", indicator, indicator)))
+            .chain(std::iter::once(format!(
+                "SUM(\"{}\") AS \"{}\"",
+                indicator, indicator
+            )))
             .collect();
 
         let group_parts: Vec<String> = group_flat.iter().map(|c| format!("\"{}\"", c)).collect();
@@ -222,11 +237,9 @@ pub fn run(
             let val: Value = match row.get_ref(i)? {
                 rusqlite::types::ValueRef::Null => Value::Null,
                 rusqlite::types::ValueRef::Integer(n) => Value::Number(n.into()),
-                rusqlite::types::ValueRef::Real(f) => {
-                    serde_json::Number::from_f64(f)
-                        .map(Value::Number)
-                        .unwrap_or(Value::Null)
-                }
+                rusqlite::types::ValueRef::Real(f) => serde_json::Number::from_f64(f)
+                    .map(Value::Number)
+                    .unwrap_or(Value::Null),
                 rusqlite::types::ValueRef::Text(t) => {
                     Value::String(String::from_utf8_lossy(t).to_string())
                 }
@@ -270,10 +283,7 @@ mod tests {
 
     #[test]
     fn test_parse_filters_multiple_columns() {
-        let raw = vec![
-            "Faculté=FBM".to_string(),
-            "Année civile=2023".to_string(),
-        ];
+        let raw = vec!["Faculté=FBM".to_string(), "Année civile=2023".to_string()];
         let filters = parse_filters(&raw).unwrap();
         assert_eq!(filters.len(), 2);
         assert_eq!(filters[0].column, "Faculté");
@@ -452,7 +462,9 @@ mod tests {
     fn test_build_order_by_column_with_colon() {
         // Column names containing ':' must not be split
         assert_eq!(
-            build_order_by(&["Cohorte (périmètre: Niveau d'étude par division facultaire):desc".to_string()]),
+            build_order_by(&[
+                "Cohorte (périmètre: Niveau d'étude par division facultaire):desc".to_string()
+            ]),
             " ORDER BY \"Cohorte (périmètre: Niveau d'étude par division facultaire)\" DESC"
         );
     }
@@ -493,9 +505,16 @@ mod tests {
     fn test_run_group_by() {
         let tmp = create_test_db();
         let result = run(
-            tmp.path(), &[], &[], &[],
-            &["Faculté".into()], &[], None,
-            "indicateur", false, "json",
+            tmp.path(),
+            &[],
+            &[],
+            &[],
+            &["Faculté".into()],
+            &[],
+            None,
+            "indicateur",
+            false,
+            "json",
         );
         assert!(result.is_ok());
     }
@@ -504,9 +523,16 @@ mod tests {
     fn test_run_group_by_repeated() {
         let tmp = create_test_db();
         let result = run(
-            tmp.path(), &[], &[], &[],
-            &["Faculté".into(), "Type".into()], &[], None,
-            "indicateur", false, "json",
+            tmp.path(),
+            &[],
+            &[],
+            &[],
+            &["Faculté".into(), "Type".into()],
+            &[],
+            None,
+            "indicateur",
+            false,
+            "json",
         );
         assert!(result.is_ok());
     }
@@ -515,9 +541,16 @@ mod tests {
     fn test_run_group_by_required() {
         let tmp = create_test_db();
         let result = run(
-            tmp.path(), &[], &[], &[],
-            &[], &[], None,
-            "indicateur", false, "json",
+            tmp.path(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            "indicateur",
+            false,
+            "json",
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("--group-by"));
@@ -527,9 +560,16 @@ mod tests {
     fn test_run_no_aggregate() {
         let tmp = create_test_db();
         let result = run(
-            tmp.path(), &[], &[], &[],
-            &[], &[], None,
-            "indicateur", true, "json",
+            tmp.path(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            None,
+            "indicateur",
+            true,
+            "json",
         );
         assert!(result.is_ok());
     }
@@ -538,10 +578,16 @@ mod tests {
     fn test_run_with_filter() {
         let tmp = create_test_db();
         let result = run(
-            tmp.path(), &[],
-            &["Faculté=FBM".into()], &[],
-            &["Faculté".into()], &[], None,
-            "indicateur", false, "json",
+            tmp.path(),
+            &[],
+            &["Faculté=FBM".into()],
+            &[],
+            &["Faculté".into()],
+            &[],
+            None,
+            "indicateur",
+            false,
+            "json",
         );
         assert!(result.is_ok());
     }
@@ -550,10 +596,16 @@ mod tests {
     fn test_run_with_exclude() {
         let tmp = create_test_db();
         let result = run(
-            tmp.path(), &[], &[],
+            tmp.path(),
+            &[],
+            &[],
             &["Type=Labo".into()],
-            &["Faculté".into()], &[], None,
-            "indicateur", false, "json",
+            &["Faculté".into()],
+            &[],
+            None,
+            "indicateur",
+            false,
+            "json",
         );
         assert!(result.is_ok());
     }
@@ -562,9 +614,16 @@ mod tests {
     fn test_run_with_limit() {
         let tmp = create_test_db();
         let result = run(
-            tmp.path(), &[], &[], &[],
-            &["Faculté".into()], &[], Some(1),
-            "indicateur", false, "json",
+            tmp.path(),
+            &[],
+            &[],
+            &[],
+            &["Faculté".into()],
+            &[],
+            Some(1),
+            "indicateur",
+            false,
+            "json",
         );
         assert!(result.is_ok());
     }
@@ -573,9 +632,16 @@ mod tests {
     fn test_run_with_arrange() {
         let tmp = create_test_db();
         let result = run(
-            tmp.path(), &[], &[], &[],
-            &["Faculté".into()], &["indicateur:desc".into()], None,
-            "indicateur", false, "json",
+            tmp.path(),
+            &[],
+            &[],
+            &[],
+            &["Faculté".into()],
+            &["indicateur:desc".into()],
+            None,
+            "indicateur",
+            false,
+            "json",
         );
         assert!(result.is_ok());
     }
@@ -584,9 +650,16 @@ mod tests {
     fn test_run_with_select() {
         let tmp = create_test_db();
         let result = run(
-            tmp.path(), &["Faculté".into()], &[], &[],
-            &["Faculté".into()], &[], None,
-            "indicateur", false, "json",
+            tmp.path(),
+            &["Faculté".into()],
+            &[],
+            &[],
+            &["Faculté".into()],
+            &[],
+            None,
+            "indicateur",
+            false,
+            "json",
         );
         assert!(result.is_ok());
     }
@@ -595,9 +668,16 @@ mod tests {
     fn test_run_no_aggregate_with_select() {
         let tmp = create_test_db();
         let result = run(
-            tmp.path(), &["Faculté".into(), "indicateur".into()], &[], &[],
-            &[], &["indicateur:desc".into()], Some(2),
-            "indicateur", true, "csv",
+            tmp.path(),
+            &["Faculté".into(), "indicateur".into()],
+            &[],
+            &[],
+            &[],
+            &["indicateur:desc".into()],
+            Some(2),
+            "indicateur",
+            true,
+            "csv",
         );
         assert!(result.is_ok());
     }

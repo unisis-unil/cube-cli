@@ -106,10 +106,7 @@ mod tests {
     #[test]
     fn test_output_json_format() {
         let columns = cols(&["name", "value"]);
-        let rows = vec![
-            vec![json!("A"), json!(10)],
-            vec![json!("B"), json!(20)],
-        ];
+        let rows = vec![vec![json!("A"), json!(10)], vec![json!("B"), json!(20)]];
         let mut buf = Vec::new();
         output_to(&columns, &rows, "json", &mut buf).unwrap();
         let output: Vec<Value> = serde_json::from_slice(&buf).unwrap();

@@ -223,9 +223,16 @@ fn main() -> ExitCode {
     }
 
     let result = match command {
-        Commands::Schema { name, dimension, search } => {
-            commands::schema::run(name.as_deref(), dimension.as_deref(), search.as_deref(), dev)
-        }
+        Commands::Schema {
+            name,
+            dimension,
+            search,
+        } => commands::schema::run(
+            name.as_deref(),
+            dimension.as_deref(),
+            search.as_deref(),
+            dev,
+        ),
         Commands::Query {
             file,
             select,
@@ -237,19 +244,22 @@ fn main() -> ExitCode {
             indicator,
             no_aggregate,
             format,
-        } => commands::schema::resolve_cube(file.to_str().unwrap_or_default(), dev)
-            .and_then(|path| commands::query::run(
-                &path,
-                &select,
-                &filter,
-                &exclude,
-                &group_by,
-                &arrange,
-                limit,
-                &indicator,
-                no_aggregate,
-                &format,
-            )),
+        } => commands::schema::resolve_cube(file.to_str().unwrap_or_default(), dev).and_then(
+            |path| {
+                commands::query::run(
+                    &path,
+                    &select,
+                    &filter,
+                    &exclude,
+                    &group_by,
+                    &arrange,
+                    limit,
+                    &indicator,
+                    no_aggregate,
+                    &format,
+                )
+            },
+        ),
         Commands::Sql {
             file,
             query,
@@ -272,7 +282,8 @@ fn main() -> ExitCode {
             // (only for data commands, not sync)
             if !is_sync {
                 let now = Local::now();
-                eprintln!("cube: today is {} ({}), {} UTC{}",
+                eprintln!(
+                    "cube: today is {} ({}), {} UTC{}",
                     now.format("%Y-%m-%d"),
                     now.format("%A"),
                     now.format("%H:%M"),

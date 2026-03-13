@@ -21,11 +21,9 @@ pub fn run(file: &Path, query: &str, format: &str) -> Result<()> {
             let val: Value = match row.get_ref(i)? {
                 rusqlite::types::ValueRef::Null => Value::Null,
                 rusqlite::types::ValueRef::Integer(n) => Value::Number(n.into()),
-                rusqlite::types::ValueRef::Real(f) => {
-                    serde_json::Number::from_f64(f)
-                        .map(Value::Number)
-                        .unwrap_or(Value::Null)
-                }
+                rusqlite::types::ValueRef::Real(f) => serde_json::Number::from_f64(f)
+                    .map(Value::Number)
+                    .unwrap_or(Value::Null),
                 rusqlite::types::ValueRef::Text(t) => {
                     Value::String(String::from_utf8_lossy(t).to_string())
                 }

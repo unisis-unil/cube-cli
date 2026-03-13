@@ -35,7 +35,12 @@ pub(crate) fn resolve_cube(name: &str, dev: bool) -> Result<PathBuf> {
     )))
 }
 
-pub fn run(name: Option<&str>, dimension: Option<&str>, search: Option<&str>, dev: bool) -> Result<()> {
+pub fn run(
+    name: Option<&str>,
+    dimension: Option<&str>,
+    search: Option<&str>,
+    dev: bool,
+) -> Result<()> {
     match (name, dimension) {
         (None, _) => list_cubes(search, dev),
         (Some(n), None) => {
@@ -172,15 +177,9 @@ fn build_catalogue_entry(file: &Path) -> Result<Value> {
         .and_then(|v| v.as_str())
         .unwrap_or("indicateur");
 
-    let dimension_count = columns
-        .iter()
-        .filter(|c| c.name != indicator_col)
-        .count();
+    let dimension_count = columns.iter().filter(|c| c.name != indicator_col).count();
 
-    let file_stem = file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("?");
+    let file_stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
 
     Ok(json!({
         "name": file_stem,
@@ -350,7 +349,7 @@ mod tests {
         // dimensions should be the merged array, not the old metadata one
         let dims = schema["dimensions"].as_array().unwrap();
         assert_eq!(dims.len(), 2); // indicator excluded
-        // Each entry has a "type" field (from columns), not just name/description/parent
+                                   // Each entry has a "type" field (from columns), not just name/description/parent
         assert!(dims[0].get("type").is_some());
     }
 
@@ -413,7 +412,13 @@ mod tests {
     #[test]
     fn test_run_with_dimension() {
         let tmp = create_test_db();
-        assert!(run(Some(tmp.path().to_str().unwrap()), Some("Faculté"), None, false).is_ok());
+        assert!(run(
+            Some(tmp.path().to_str().unwrap()),
+            Some("Faculté"),
+            None,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -425,7 +430,12 @@ mod tests {
     #[test]
     fn test_run_nonexistent_dimension() {
         let tmp = create_test_db();
-        let result = run(Some(tmp.path().to_str().unwrap()), Some("Nope"), None, false);
+        let result = run(
+            Some(tmp.path().to_str().unwrap()),
+            Some("Nope"),
+            None,
+            false,
+        );
         assert!(result.is_err());
     }
 
@@ -511,11 +521,8 @@ mod tests {
         .unwrap();
         // Insert 25 distinct sorted values: V01..V25
         for i in 1..=25 {
-            conn.execute(
-                "INSERT INTO data VALUES (?1, 1.0)",
-                [format!("V{:02}", i)],
-            )
-            .unwrap();
+            conn.execute("INSERT INTO data VALUES (?1, 1.0)", [format!("V{:02}", i)])
+                .unwrap();
         }
         tmp
     }

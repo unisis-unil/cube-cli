@@ -83,7 +83,7 @@ fn test_schema_json_output() {
     assert_eq!(json["row_count"], 8);
     let dims = json["dimensions"].as_array().unwrap();
     assert_eq!(dims.len(), 2); // indicator excluded
-    // Level 1: low cardinality (≤ 20) → sorted "values" array
+                               // Level 1: low cardinality (≤ 20) → sorted "values" array
     let fac = &dims[0];
     assert_eq!(fac["name"], "Faculté");
     assert_eq!(fac["distinct_count"], 3);
@@ -177,9 +177,12 @@ fn test_query_group_by_json() {
     let output = Command::cargo_bin("cube")
         .unwrap()
         .args([
-            "query", db.to_str().unwrap(),
-            "--group-by", "Faculté",
-            "--format", "json",
+            "query",
+            db.to_str().unwrap(),
+            "--group-by",
+            "Faculté",
+            "--format",
+            "json",
         ])
         .output()
         .unwrap();
@@ -198,9 +201,12 @@ fn test_query_group_by_csv() {
     let output = Command::cargo_bin("cube")
         .unwrap()
         .args([
-            "query", db.to_str().unwrap(),
-            "--group-by", "Faculté",
-            "--format", "csv",
+            "query",
+            db.to_str().unwrap(),
+            "--group-by",
+            "Faculté",
+            "--format",
+            "csv",
         ])
         .output()
         .unwrap();
@@ -217,10 +223,14 @@ fn test_query_filter_include() {
     let output = Command::cargo_bin("cube")
         .unwrap()
         .args([
-            "query", db.to_str().unwrap(),
-            "--group-by", "Faculté",
-            "--filter", "Faculté=FBM",
-            "--format", "json",
+            "query",
+            db.to_str().unwrap(),
+            "--group-by",
+            "Faculté",
+            "--filter",
+            "Faculté=FBM",
+            "--format",
+            "json",
         ])
         .output()
         .unwrap();
@@ -237,11 +247,16 @@ fn test_query_filter_multiple_values() {
     let output = Command::cargo_bin("cube")
         .unwrap()
         .args([
-            "query", db.to_str().unwrap(),
-            "--group-by", "Faculté",
-            "--filter", "Faculté=FBM",
-            "--filter", "Faculté=SSP",
-            "--format", "json",
+            "query",
+            db.to_str().unwrap(),
+            "--group-by",
+            "Faculté",
+            "--filter",
+            "Faculté=FBM",
+            "--filter",
+            "Faculté=SSP",
+            "--format",
+            "json",
         ])
         .output()
         .unwrap();
@@ -256,11 +271,16 @@ fn test_query_exclude() {
     let output = Command::cargo_bin("cube")
         .unwrap()
         .args([
-            "query", db.to_str().unwrap(),
-            "--group-by", "Faculté,Type",
-            "--filter", "Faculté=FBM",
-            "--exclude", "Type=Labo",
-            "--format", "json",
+            "query",
+            db.to_str().unwrap(),
+            "--group-by",
+            "Faculté,Type",
+            "--filter",
+            "Faculté=FBM",
+            "--exclude",
+            "Type=Labo",
+            "--format",
+            "json",
         ])
         .output()
         .unwrap();
@@ -277,16 +297,23 @@ fn test_query_arrange_desc() {
     let output = Command::cargo_bin("cube")
         .unwrap()
         .args([
-            "query", db.to_str().unwrap(),
-            "--group-by", "Faculté",
-            "--arrange", "indicateur:desc",
-            "--format", "json",
+            "query",
+            db.to_str().unwrap(),
+            "--group-by",
+            "Faculté",
+            "--arrange",
+            "indicateur:desc",
+            "--format",
+            "json",
         ])
         .output()
         .unwrap();
     assert!(output.status.success());
     let json: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
-    let values: Vec<f64> = json.iter().map(|r| r["indicateur"].as_f64().unwrap()).collect();
+    let values: Vec<f64> = json
+        .iter()
+        .map(|r| r["indicateur"].as_f64().unwrap())
+        .collect();
     assert!(values[0] >= values[1] && values[1] >= values[2]);
 }
 
@@ -296,11 +323,16 @@ fn test_query_limit() {
     let output = Command::cargo_bin("cube")
         .unwrap()
         .args([
-            "query", db.to_str().unwrap(),
-            "--group-by", "Faculté",
-            "--arrange", "indicateur:desc",
-            "--limit", "2",
-            "--format", "json",
+            "query",
+            db.to_str().unwrap(),
+            "--group-by",
+            "Faculté",
+            "--arrange",
+            "indicateur:desc",
+            "--limit",
+            "2",
+            "--format",
+            "json",
         ])
         .output()
         .unwrap();
@@ -315,9 +347,11 @@ fn test_query_no_aggregate() {
     let output = Command::cargo_bin("cube")
         .unwrap()
         .args([
-            "query", db.to_str().unwrap(),
+            "query",
+            db.to_str().unwrap(),
             "--no-aggregate",
-            "--format", "json",
+            "--format",
+            "json",
         ])
         .output()
         .unwrap();
@@ -332,12 +366,17 @@ fn test_query_no_aggregate_with_select_and_limit() {
     let output = Command::cargo_bin("cube")
         .unwrap()
         .args([
-            "query", db.to_str().unwrap(),
+            "query",
+            db.to_str().unwrap(),
             "--no-aggregate",
-            "--select", "Faculté,indicateur",
-            "--arrange", "indicateur:desc",
-            "--limit", "3",
-            "--format", "json",
+            "--select",
+            "Faculté,indicateur",
+            "--arrange",
+            "indicateur:desc",
+            "--limit",
+            "3",
+            "--format",
+            "json",
         ])
         .output()
         .unwrap();
@@ -367,11 +406,16 @@ fn test_query_select_subset() {
     let output = Command::cargo_bin("cube")
         .unwrap()
         .args([
-            "query", db.to_str().unwrap(),
-            "--group-by", "Faculté,Type",
-            "--select", "Faculté",
-            "--limit", "1",
-            "--format", "json",
+            "query",
+            db.to_str().unwrap(),
+            "--group-by",
+            "Faculté,Type",
+            "--select",
+            "Faculté",
+            "--limit",
+            "1",
+            "--format",
+            "json",
         ])
         .output()
         .unwrap();
@@ -387,9 +431,12 @@ fn test_query_multi_group_by() {
     let output = Command::cargo_bin("cube")
         .unwrap()
         .args([
-            "query", db.to_str().unwrap(),
-            "--group-by", "Faculté,Type",
-            "--format", "json",
+            "query",
+            db.to_str().unwrap(),
+            "--group-by",
+            "Faculté,Type",
+            "--format",
+            "json",
         ])
         .output()
         .unwrap();
@@ -425,7 +472,8 @@ fn test_sql_table_format() {
     Command::cargo_bin("cube")
         .unwrap()
         .args([
-            "sql", db.to_str().unwrap(),
+            "sql",
+            db.to_str().unwrap(),
             "SELECT COUNT(*) AS n FROM data",
         ])
         .assert()
@@ -439,9 +487,11 @@ fn test_sql_csv_format() {
     let output = Command::cargo_bin("cube")
         .unwrap()
         .args([
-            "sql", db.to_str().unwrap(),
+            "sql",
+            db.to_str().unwrap(),
             "SELECT COUNT(*) AS n FROM data",
-            "--format", "csv",
+            "--format",
+            "csv",
         ])
         .output()
         .unwrap();

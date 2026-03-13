@@ -18,7 +18,11 @@ const BUCKET_DEV: &str = "unisis-data-dev.unisis.ch";
 const GCS_API: &str = "https://storage.googleapis.com/storage/v1";
 
 pub fn bucket_for(dev: bool) -> &'static str {
-    if dev { BUCKET_DEV } else { BUCKET_PROD }
+    if dev {
+        BUCKET_DEV
+    } else {
+        BUCKET_PROD
+    }
 }
 
 // ── Metadata ────────────────────────────────────────────────────────
@@ -101,7 +105,12 @@ where
 }
 
 /// List "subdirectories" at a given prefix (using delimiter=/).
-fn gcs_list_prefixes(client: &Client, token: &str, bucket: &str, prefix: &str) -> Result<Vec<String>> {
+fn gcs_list_prefixes(
+    client: &Client,
+    token: &str,
+    bucket: &str,
+    prefix: &str,
+) -> Result<Vec<String>> {
     let mut all_prefixes = Vec::new();
     let mut page_token: Option<String> = None;
 
@@ -200,9 +209,7 @@ fn find_latest_ready_snapshot(
                 return Ok(Some((ts.to_string(), manifest)));
             }
             None => {
-                eprintln!(
-                    "  Snapshot {ts} : pas de manifeste (export en cours ou échoué)."
-                );
+                eprintln!("  Snapshot {ts} : pas de manifeste (export en cours ou échoué).");
             }
         }
     }
@@ -211,19 +218,25 @@ fn find_latest_ready_snapshot(
 }
 
 /// Find the latest timestamp directory under prefix (without manifest check).
-fn find_latest_timestamp(client: &Client, token: &str, bucket: &str, prefix: &str) -> Result<String> {
+fn find_latest_timestamp(
+    client: &Client,
+    token: &str,
+    bucket: &str,
+    prefix: &str,
+) -> Result<String> {
     let prefixes = gcs_list_prefixes(client, token, bucket, prefix)?;
 
     if prefixes.is_empty() {
         bail!("Aucun répertoire trouvé sous gs://{bucket}/{prefix}");
     }
 
-    let latest = prefixes
-        .iter()
-        .max()
-        .context("Aucun répertoire trouvé")?;
+    let latest = prefixes.iter().max().context("Aucun répertoire trouvé")?;
 
-    let ts = latest.trim_end_matches('/').rsplit('/').next().unwrap_or(latest);
+    let ts = latest
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(latest);
     Ok(ts.to_string())
 }
 
@@ -307,11 +320,9 @@ fn download_object(
 // ── Progress styles ─────────────────────────────────────────────────
 
 fn style_overall() -> ProgressStyle {
-    ProgressStyle::with_template(
-        "{prefix:.bold.cyan} [{bar:30.cyan/dim}] {pos}/{len} cubes  {msg}",
-    )
-    .unwrap()
-    .progress_chars("━╸─")
+    ProgressStyle::with_template("{prefix:.bold.cyan} [{bar:30.cyan/dim}] {pos}/{len} cubes  {msg}")
+        .unwrap()
+        .progress_chars("━╸─")
 }
 
 fn style_download() -> ProgressStyle {
@@ -416,7 +427,7 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
         None => {
             return Err(crate::error::CubeError::unavailable(
                 "Aucun snapshot complet trouvé (aucun manifeste disponible). \
-                 Un export est peut-être en cours. Réessayez plus tard."
+                 Un export est peut-être en cours. Réessayez plus tard.",
             ));
         }
     };
@@ -434,7 +445,11 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     } else {
         eprintln!(
             "Mise à jour : {} → {}",
-            if meta.remote_timestamp.is_empty() { "(aucun)" } else { &meta.remote_timestamp },
+            if meta.remote_timestamp.is_empty() {
+                "(aucun)"
+            } else {
+                &meta.remote_timestamp
+            },
             remote_ts
         );
     }
@@ -483,7 +498,9 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     for obj in &sqlite_objects {
         let gz_filename = obj.name.rsplit('/').next().unwrap_or(&obj.name);
         let local_filename = gz_filename.strip_suffix(".gz").unwrap_or(gz_filename);
-        let display_name = local_filename.strip_suffix(".sqlite").unwrap_or(local_filename);
+        let display_name = local_filename
+            .strip_suffix(".sqlite")
+            .unwrap_or(local_filename);
         let local_path = cache.join(local_filename);
 
         overall.set_message(display_name.to_string());
@@ -495,9 +512,7 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
                     let done_pb = mp.add(ProgressBar::new(0));
                     done_pb.set_style(style_done());
                     done_pb.set_prefix(display_name.to_string());
-                    let local_size = std::fs::metadata(&local_path)
-                        .map(|m| m.len())
-                        .unwrap_or(0);
+                    let local_size = std::fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0);
                     done_pb.finish_with_message(format!(
                         "{} à jour ({})",
                         style("✓").green(),
@@ -529,10 +544,8 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
             if local_hash != obj.crc32c {
                 let _ = std::fs::remove_file(&tmp_gz);
                 file_pb.set_style(style_done());
-                file_pb.finish_with_message(format!(
-                    "{} hash incorrect, ignoré",
-                    style("✗").yellow()
-                ));
+                file_pb
+                    .finish_with_message(format!("{} hash incorrect, ignoré", style("✗").yellow()));
                 overall.inc(1);
                 continue;
             }
@@ -557,17 +570,12 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
         if !sqlite_integrity_ok(&tmp_sqlite) {
             let _ = std::fs::remove_file(&tmp_sqlite);
             file_pb.set_style(style_done());
-            file_pb.finish_with_message(format!(
-                "{} corrompu, ignoré",
-                style("✗").yellow()
-            ));
+            file_pb.finish_with_message(format!("{} corrompu, ignoré", style("✗").yellow()));
             overall.inc(1);
             continue;
         }
 
-        let decompressed_size = std::fs::metadata(&tmp_sqlite)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let decompressed_size = std::fs::metadata(&tmp_sqlite).map(|m| m.len()).unwrap_or(0);
 
         std::fs::rename(&tmp_sqlite, &local_path)?;
         meta.file_checksums
