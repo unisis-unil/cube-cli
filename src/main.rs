@@ -179,9 +179,10 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let dev = cli.dev;
+    let is_sync = matches!(cli.command, Commands::Sync { .. });
 
     // Check for cube updates before schema/query/sql (not sync)
-    if !matches!(cli.command, Commands::Sync { .. }) {
+    if !is_sync {
         commands::sync::check_for_updates(dev);
     }
 
@@ -232,13 +233,16 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => {
             // Emit current date/time so LLM agents have temporal context
-            let now = Local::now();
-            eprintln!("cube: today is {} ({}), {} UTC{}",
-                now.format("%Y-%m-%d"),
-                now.format("%A"),
-                now.format("%H:%M"),
-                now.format("%:z"),
-            );
+            // (only for data commands, not sync)
+            if !is_sync {
+                let now = Local::now();
+                eprintln!("cube: today is {} ({}), {} UTC{}",
+                    now.format("%Y-%m-%d"),
+                    now.format("%A"),
+                    now.format("%H:%M"),
+                    now.format("%:z"),
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {

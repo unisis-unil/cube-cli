@@ -1,8 +1,11 @@
 use anyhow::{bail, Context, Result};
+use base64::Engine;
 use chrono::Utc;
 use console::style;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
@@ -10,16 +13,17 @@ const SYNC_METADATA_FILE: &str = ".sync_metadata.json";
 const CHECK_TTL_SECONDS: i64 = 3 * 3600; // 3 hours
 const BUCKET_PROD: &str = "unisis-data.unisis.ch";
 const BUCKET_DEV: &str = "unisis-data-dev.unisis.ch";
+const GCS_API: &str = "https://storage.googleapis.com/storage/v1";
 
 pub fn bucket_for(dev: bool) -> &'static str {
     if dev { BUCKET_DEV } else { BUCKET_PROD }
 }
 
+// ── Metadata ────────────────────────────────────────────────────────
+
 #[derive(Serialize, Deserialize, Default)]
 struct SyncMetadata {
-    /// Timestamp du répertoire GCS utilisé lors du dernier sync
     remote_timestamp: String,
-    /// ISO 8601 datetime of the last GCS check
     #[serde(default)]
     last_checked_at: Option<String>,
 }
@@ -43,37 +47,206 @@ fn write_sync_metadata(cache: &Path, metadata: &SyncMetadata) -> Result<()> {
     Ok(())
 }
 
-/// Extrait le timestamp du chemin GCS d'un répertoire.
-/// Ex: "gs://bucket/cubes/2026-03-12T231707/" -> "2026-03-12T231707"
-fn extract_timestamp(dir_path: &str) -> &str {
-    dir_path
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or(dir_path)
-}
+// ── GCS API ─────────────────────────────────────────────────────────
 
-/// Fetch the latest remote timestamp from GCS.
-/// Returns None on any failure (no network, gsutil missing, etc.)
-fn fetch_latest_remote_timestamp(bucket: &str, prefix: &str) -> Option<String> {
-    let output = Command::new("gsutil")
-        .args(["ls", &format!("gs://{bucket}/{prefix}")])
-        .stderr(std::process::Stdio::null())
+fn get_access_token() -> Result<String> {
+    let output = Command::new("gcloud")
+        .args(["auth", "application-default", "print-access-token"])
+        .stderr(std::process::Stdio::piped())
         .output()
-        .ok()?;
+        .context(
+            "gcloud introuvable. Installez le SDK Google Cloud et exécutez \
+             'gcloud auth application-default login'.",
+        )?;
 
     if !output.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Impossible d'obtenir un token d'accès. \
+             Exécutez 'gcloud auth application-default login'.\n{stderr}"
+        );
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let latest = stdout.lines().filter(|l| !l.is_empty()).max()?;
-    Some(extract_timestamp(latest).to_string())
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Check if cubes need updating. Called before schema/query/sql commands.
-/// Only contacts GCS if the last check was more than CHECK_TTL_SECONDS ago.
-/// Prints a warning to stderr if an update is available. Silently ignores errors.
+#[derive(Deserialize)]
+struct GcsListResponse {
+    #[serde(default)]
+    prefixes: Vec<String>,
+    #[serde(default)]
+    items: Vec<GcsObject>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+struct GcsObject {
+    name: String,
+    #[serde(deserialize_with = "deserialize_string_u64")]
+    size: u64,
+    crc32c: String,
+}
+
+fn deserialize_string_u64<'de, D>(deserializer: D) -> std::result::Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    s.parse().map_err(serde::de::Error::custom)
+}
+
+/// List "subdirectories" at a given prefix (using delimiter=/).
+fn gcs_list_prefixes(client: &Client, token: &str, bucket: &str, prefix: &str) -> Result<Vec<String>> {
+    let mut all_prefixes = Vec::new();
+    let mut page_token: Option<String> = None;
+
+    loop {
+        let mut req = client
+            .get(format!("{GCS_API}/b/{bucket}/o"))
+            .bearer_auth(token)
+            .query(&[("prefix", prefix), ("delimiter", "/")]);
+
+        if let Some(ref pt) = page_token {
+            req = req.query(&[("pageToken", pt.as_str())]);
+        }
+
+        let resp: GcsListResponse = req.send()?.error_for_status()?.json()?;
+        all_prefixes.extend(resp.prefixes);
+
+        match resp.next_page_token {
+            Some(pt) => page_token = Some(pt),
+            None => break,
+        }
+    }
+
+    Ok(all_prefixes)
+}
+
+/// List all objects under a prefix.
+fn gcs_list_objects(client: &Client, token: &str, bucket: &str, prefix: &str) -> Result<Vec<GcsObject>> {
+    let mut all_items = Vec::new();
+    let mut page_token: Option<String> = None;
+
+    loop {
+        let mut req = client
+            .get(format!("{GCS_API}/b/{bucket}/o"))
+            .bearer_auth(token)
+            .query(&[("prefix", prefix)]);
+
+        if let Some(ref pt) = page_token {
+            req = req.query(&[("pageToken", pt.as_str())]);
+        }
+
+        let resp: GcsListResponse = req.send()?.error_for_status()?.json()?;
+        all_items.extend(resp.items);
+
+        match resp.next_page_token {
+            Some(pt) => page_token = Some(pt),
+            None => break,
+        }
+    }
+
+    Ok(all_items)
+}
+
+/// Find the latest timestamp directory under prefix.
+fn find_latest_timestamp(client: &Client, token: &str, bucket: &str, prefix: &str) -> Result<String> {
+    let prefixes = gcs_list_prefixes(client, token, bucket, prefix)?;
+
+    if prefixes.is_empty() {
+        bail!("Aucun répertoire trouvé sous gs://{bucket}/{prefix}");
+    }
+
+    let latest = prefixes
+        .iter()
+        .max()
+        .context("Aucun répertoire trouvé")?;
+
+    let ts = latest.trim_end_matches('/').rsplit('/').next().unwrap_or(latest);
+    Ok(ts.to_string())
+}
+
+// ── CRC32C ──────────────────────────────────────────────────────────
+
+/// Compute CRC32C of a local file and return it base64-encoded (same format as GCS).
+fn local_crc32c_b64(path: &Path) -> Result<String> {
+    let data = std::fs::read(path)?;
+    let hash = crc32c::crc32c(&data);
+    let bytes = hash.to_be_bytes();
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+// ── Download ────────────────────────────────────────────────────────
+
+fn download_object(
+    client: &Client,
+    token: &str,
+    bucket: &str,
+    object: &GcsObject,
+    dest: &Path,
+    pb: &ProgressBar,
+) -> Result<()> {
+    let encoded_name = urlencoding::encode(&object.name);
+    let url = format!("{GCS_API}/b/{bucket}/o/{encoded_name}?alt=media");
+
+    let mut resp = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()?
+        .error_for_status()?;
+
+    let mut file = std::fs::File::create(dest)?;
+    let mut downloaded: u64 = 0;
+    let mut buf = vec![0u8; 256 * 1024]; // 256 KB chunks
+
+    loop {
+        let n = std::io::Read::read(&mut resp, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buf[..n])?;
+        downloaded += n as u64;
+        pb.set_position(downloaded);
+    }
+
+    Ok(())
+}
+
+// ── Progress styles ─────────────────────────────────────────────────
+
+fn style_overall() -> ProgressStyle {
+    ProgressStyle::with_template(
+        "{prefix:.bold.cyan} [{bar:30.cyan/dim}] {pos}/{len} cubes  {msg}",
+    )
+    .unwrap()
+    .progress_chars("━╸─")
+}
+
+fn style_download() -> ProgressStyle {
+    ProgressStyle::with_template(
+        "  [{bar:25.green/dim}] {bytes}/{total_bytes} {bytes_per_sec}  {prefix}",
+    )
+    .unwrap()
+    .progress_chars("━╸─")
+}
+
+fn style_done() -> ProgressStyle {
+    ProgressStyle::with_template("  {msg} {prefix}").unwrap()
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.0} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+// ── check_for_updates ───────────────────────────────────────────────
+
 pub fn check_for_updates(dev: bool) {
     let cache = match default_cache_dir(dev) {
         Ok(c) => c,
@@ -82,7 +255,6 @@ pub fn check_for_updates(dev: bool) {
 
     let mut meta = read_sync_metadata(&cache);
 
-    // Check TTL
     if let Some(ref last_checked) = meta.last_checked_at {
         if let Ok(last) = chrono::DateTime::parse_from_rfc3339(last_checked) {
             let elapsed = Utc::now().signed_duration_since(last);
@@ -92,17 +264,15 @@ pub fn check_for_updates(dev: bool) {
         }
     }
 
-    // TTL expired — check GCS
-    let remote_ts = match fetch_latest_remote_timestamp(bucket_for(dev), "cubes/") {
+    // Try to check via API (fast, no gsutil dependency)
+    let remote_ts = match check_latest_timestamp_quiet(bucket_for(dev), "cubes/") {
         Some(ts) => ts,
-        None => return, // no network or gsutil error — skip silently
+        None => return,
     };
 
-    // Update last_checked_at regardless of result
     meta.last_checked_at = Some(Utc::now().to_rfc3339());
     let _ = write_sync_metadata(&cache, &meta);
 
-    // Compare
     let sync_cmd = if dev { "cube --dev sync" } else { "cube sync" };
     if !meta.remote_timestamp.is_empty() && remote_ts != meta.remote_timestamp {
         eprintln!(
@@ -116,6 +286,15 @@ pub fn check_for_updates(dev: bool) {
     }
 }
 
+/// Quick timestamp check — silently returns None on any error.
+fn check_latest_timestamp_quiet(bucket: &str, prefix: &str) -> Option<String> {
+    let token = get_access_token().ok()?;
+    let client = Client::new();
+    find_latest_timestamp(&client, &token, bucket, prefix).ok()
+}
+
+// ── run ─────────────────────────────────────────────────────────────
+
 pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) -> Result<()> {
     let dev = bucket == BUCKET_DEV;
     let cache = match cache_dir {
@@ -124,34 +303,26 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     };
     std::fs::create_dir_all(&cache)?;
 
+    // Clean up any leftover .tmp files from a previous interrupted sync
+    if let Ok(entries) = std::fs::read_dir(&cache) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
     let mut meta = read_sync_metadata(&cache);
 
-    eprintln!("Listing gs://{bucket}/{prefix} ...");
+    eprintln!("Authentification...");
+    let token = get_access_token()?;
+    let client = Client::new();
 
-    let output = Command::new("gsutil")
-        .args(["ls", &format!("gs://{bucket}/{prefix}")])
-        .output()
-        .context("gsutil introuvable. Installez le SDK Google Cloud et exécutez 'gcloud auth application-default login'.")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("gsutil ls a échoué : {stderr}");
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let dirs: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
-
-    if dirs.is_empty() {
-        bail!("Aucun objet trouvé sous gs://{bucket}/{prefix}");
-    }
-
-    let latest = dirs
-        .iter()
-        .max()
-        .context("Aucun répertoire trouvé")?;
-
-    let remote_ts = extract_timestamp(latest).to_string();
-    eprintln!("Répertoire le plus récent : {latest} (timestamp: {remote_ts})");
+    eprintln!("Recherche du dernier snapshot sur gs://{bucket}/{prefix} ...");
+    let remote_ts = find_latest_timestamp(&client, &token, bucket, prefix)?;
+    let remote_prefix = format!("{prefix}{remote_ts}/");
+    eprintln!("Snapshot le plus récent : {remote_ts}");
 
     if !force && meta.remote_timestamp == remote_ts {
         eprintln!("Le cache est à jour (timestamp: {remote_ts}).");
@@ -164,69 +335,117 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
         eprintln!("Re-synchronisation forcée (timestamp: {remote_ts}).");
     } else {
         eprintln!(
-            "Mise à jour détectée : {} → {}",
-            if meta.remote_timestamp.is_empty() {
-                "(aucun)"
-            } else {
-                &meta.remote_timestamp
-            },
+            "Mise à jour : {} → {}",
+            if meta.remote_timestamp.is_empty() { "(aucun)" } else { &meta.remote_timestamp },
             remote_ts
         );
     }
 
-    // gsutil rsync compares hashes and only downloads changed files.
-    // -m: parallel transfers, -d: delete local files not in remote, -x: exclude metadata file
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::with_template("{prefix:.bold} {spinner:.cyan} {msg}")
-            .unwrap()
-            .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏ "),
-    );
-    pb.set_prefix("sync");
-    pb.set_message("rsync en cours...");
-    pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    // List all .sqlite objects in the latest snapshot
+    let objects = gcs_list_objects(&client, &token, bucket, &remote_prefix)?;
+    let sqlite_objects: Vec<GcsObject> = objects
+        .into_iter()
+        .filter(|o| o.name.ends_with(".sqlite"))
+        .collect();
 
-    let source = format!("{latest}");
-    let exclude_pattern = format!(r"^\.sync_metadata\.json$");
-
-    let rsync = Command::new("gsutil")
-        .args([
-            "-m", "-q", "rsync",
-            "-d",
-            "-x", &exclude_pattern,
-            &source,
-            &cache.to_string_lossy(),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .output()?;
-
-    pb.finish_and_clear();
-
-    if !rsync.status.success() {
-        let stderr = String::from_utf8_lossy(&rsync.stderr);
-        bail!("gsutil rsync a échoué : {stderr}");
+    if sqlite_objects.is_empty() {
+        bail!("Aucun fichier .sqlite trouvé dans gs://{bucket}/{remote_prefix}");
     }
 
-    // Count .sqlite files in cache
-    let cube_count = std::fs::read_dir(&cache)?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                == Some("sqlite")
-        })
-        .count();
+    // Set up multi-progress display
+    let mp = MultiProgress::new();
+    let overall = mp.add(ProgressBar::new(sqlite_objects.len() as u64));
+    overall.set_style(style_overall());
+    overall.set_prefix("sync");
+
+    let mut downloaded: u64 = 0;
+    let mut skipped: u64 = 0;
+    let mut downloaded_bytes: u64 = 0;
+
+    let remote_filenames: Vec<String> = sqlite_objects
+        .iter()
+        .filter_map(|o| o.name.rsplit('/').next().map(|s| s.to_string()))
+        .collect();
+
+    for obj in &sqlite_objects {
+        let filename = obj.name.rsplit('/').next().unwrap_or(&obj.name);
+        let display_name = filename.strip_suffix(".sqlite").unwrap_or(filename);
+        let local_path = cache.join(filename);
+
+        overall.set_message(display_name.to_string());
+
+        // Check if local file matches remote (CRC32C comparison)
+        if local_path.exists() {
+            if let Ok(local_hash) = local_crc32c_b64(&local_path) {
+                if local_hash == obj.crc32c {
+                    let done_pb = mp.add(ProgressBar::new(0));
+                    done_pb.set_style(style_done());
+                    done_pb.set_prefix(display_name.to_string());
+                    done_pb.finish_with_message(format!(
+                        "{} à jour ({})",
+                        style("✓").green(),
+                        format_size(obj.size)
+                    ));
+                    skipped += 1;
+                    overall.inc(1);
+                    continue;
+                }
+            }
+        }
+
+        // Download to a temp file, then rename atomically to avoid partial files
+        let tmp_path = cache.join(format!(".{filename}.tmp"));
+        let file_pb = mp.add(ProgressBar::new(obj.size));
+        file_pb.set_style(style_download());
+        file_pb.set_prefix(display_name.to_string());
+
+        if let Err(e) = download_object(&client, &token, bucket, obj, &tmp_path, &file_pb) {
+            let _ = std::fs::remove_file(&tmp_path);
+            file_pb.set_style(style_done());
+            file_pb.finish_with_message(format!("{} erreur", style("✗").red()));
+            bail!(e);
+        }
+
+        std::fs::rename(&tmp_path, &local_path)?;
+
+        file_pb.set_style(style_done());
+        file_pb.finish_with_message(format!(
+            "{} téléchargé ({})",
+            style("✓").green(),
+            format_size(obj.size)
+        ));
+
+        downloaded += 1;
+        downloaded_bytes += obj.size;
+        overall.inc(1);
+    }
+
+    overall.finish_and_clear();
+
+    // Delete local .sqlite files not in the remote snapshot
+    for entry in std::fs::read_dir(&cache)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("sqlite") {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if !remote_filenames.contains(&name.to_string()) {
+                    std::fs::remove_file(&path)?;
+                    eprintln!("  {} supprimé (absent du remote)", name);
+                }
+            }
+        }
+    }
 
     meta.remote_timestamp = remote_ts;
     meta.last_checked_at = Some(Utc::now().to_rfc3339());
     write_sync_metadata(&cache, &meta)?;
 
     eprintln!(
-        "{} Synchronisation terminée ({} cubes). Cache : {}",
+        "\n{} Synchronisation terminée — {} téléchargé(s) ({}), {} à jour. Cache : {}",
         style("✓").green().bold(),
-        cube_count,
+        downloaded,
+        format_size(downloaded_bytes),
+        skipped,
         cache.display()
     );
     Ok(())
@@ -236,19 +455,6 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
 mod tests {
     use super::*;
     use tempfile::TempDir;
-
-    #[test]
-    fn test_extract_timestamp() {
-        assert_eq!(
-            extract_timestamp("gs://bucket/cubes/2026-03-12T231707/"),
-            "2026-03-12T231707"
-        );
-        assert_eq!(
-            extract_timestamp("gs://bucket/cubes/2026-03-15T100000/"),
-            "2026-03-15T100000"
-        );
-        assert_eq!(extract_timestamp("simple"), "simple");
-    }
 
     #[test]
     fn test_sync_metadata_roundtrip() {
@@ -295,5 +501,22 @@ mod tests {
     fn test_bucket_for() {
         assert_eq!(bucket_for(false), "unisis-data.unisis.ch");
         assert_eq!(bucket_for(true), "unisis-data-dev.unisis.ch");
+    }
+
+    #[test]
+    fn test_local_crc32c_b64() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.bin");
+        std::fs::write(&path, b"hello world").unwrap();
+        let hash = local_crc32c_b64(&path).unwrap();
+        // crc32c("hello world") = 0xc99465aa → base64 = "yZRlqg=="
+        assert_eq!(hash, "yZRlqg==");
+    }
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(500), "500 B");
+        assert_eq!(format_size(2048), "2 KB");
+        assert_eq!(format_size(5_500_000), "5.2 MB");
     }
 }
