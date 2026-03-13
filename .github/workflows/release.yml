@@ -44,6 +44,10 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Sign binary (macOS only)
+        if: contains(matrix.target, 'apple-darwin')
+        run: codesign -s - target/${{ matrix.target }}/release/cube
+
       - name: Package binary
         run: |
           cd target/${{ matrix.target }}/release

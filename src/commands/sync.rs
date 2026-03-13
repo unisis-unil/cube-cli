@@ -59,7 +59,7 @@ fn write_sync_metadata(cache: &Path, metadata: &SyncMetadata) -> Result<()> {
 
 // ── GCS API ─────────────────────────────────────────────────────────
 
-fn get_access_token() -> Result<String> {
+pub fn get_access_token() -> Result<String> {
     let output = Command::new("gcloud")
         .args(["auth", "application-default", "print-access-token"])
         .stderr(std::process::Stdio::piped())
@@ -252,8 +252,10 @@ fn local_crc32c_b64(path: &Path) -> Result<String> {
 
 // ── SQLite integrity ────────────────────────────────────────────────
 
-/// Quick integrity check: open the file, verify the schema metadata is readable.
-fn sqlite_integrity_ok(path: &Path) -> bool {
+/// Quick integrity check: open the file (with optional encryption key),
+/// verify the schema metadata is readable.
+#[allow(dead_code)]
+fn sqlite_integrity_ok(path: &Path, key: Option<&str>) -> bool {
     let conn = match rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -261,7 +263,11 @@ fn sqlite_integrity_ok(path: &Path) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
-    // Check that SQLite can read the file and the metadata table exists
+    if let Some(k) = key {
+        if conn.pragma_update(None, "key", k).is_err() {
+            return false;
+        }
+    }
     conn.query_row(
         "SELECT value FROM metadata WHERE key = 'schema'",
         [],
@@ -457,7 +463,7 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     let sqlite_objects: Vec<GcsObject> = manifest
         .files
         .iter()
-        .filter(|f| f.name.ends_with(".sqlite.gz"))
+        .filter(|f| f.name.ends_with(".sqlite.gz") || f.name.ends_with(".sqlite"))
         .map(|f| GcsObject {
             name: format!("{remote_prefix}{}", f.name),
             size: f.size,
@@ -466,7 +472,7 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
         .collect();
 
     if sqlite_objects.is_empty() {
-        bail!("Aucun fichier .sqlite.gz dans le manifeste de gs://{bucket}/{remote_prefix}");
+        bail!("Aucun fichier .sqlite dans le manifeste de gs://{bucket}/{remote_prefix}");
     }
 
     eprintln!(
@@ -496,8 +502,15 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
         .collect();
 
     for obj in &sqlite_objects {
-        let gz_filename = obj.name.rsplit('/').next().unwrap_or(&obj.name);
-        let local_filename = gz_filename.strip_suffix(".gz").unwrap_or(gz_filename);
+        let remote_filename = obj.name.rsplit('/').next().unwrap_or(&obj.name);
+        let is_gz = remote_filename.ends_with(".gz");
+        let local_filename = if is_gz {
+            remote_filename
+                .strip_suffix(".gz")
+                .unwrap_or(remote_filename)
+        } else {
+            remote_filename
+        };
         let display_name = local_filename
             .strip_suffix(".sqlite")
             .unwrap_or(local_filename);
@@ -525,24 +538,23 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
             }
         }
 
-        // Download .gz to a temp file
-        let tmp_gz = cache.join(format!(".{gz_filename}.tmp"));
-        let tmp_sqlite = cache.join(format!(".{local_filename}.tmp"));
+        // Download to a temp file
+        let tmp_download = cache.join(format!(".{remote_filename}.tmp"));
         let file_pb = mp.add(ProgressBar::new(obj.size));
         file_pb.set_style(style_download());
         file_pb.set_prefix(display_name.to_string());
 
-        if let Err(e) = download_object(&client, &token, bucket, obj, &tmp_gz, &file_pb) {
-            let _ = std::fs::remove_file(&tmp_gz);
+        if let Err(e) = download_object(&client, &token, bucket, obj, &tmp_download, &file_pb) {
+            let _ = std::fs::remove_file(&tmp_download);
             file_pb.set_style(style_done());
             file_pb.finish_with_message(format!("{} erreur", style("✗").red()));
             bail!(e);
         }
 
-        // Verify CRC32C of the compressed file
-        if let Ok(local_hash) = local_crc32c_b64(&tmp_gz) {
+        // Verify CRC32C of the downloaded file
+        if let Ok(local_hash) = local_crc32c_b64(&tmp_download) {
             if local_hash != obj.crc32c {
-                let _ = std::fs::remove_file(&tmp_gz);
+                let _ = std::fs::remove_file(&tmp_download);
                 file_pb.set_style(style_done());
                 file_pb
                     .finish_with_message(format!("{} hash incorrect, ignoré", style("✗").yellow()));
@@ -551,46 +563,51 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
             }
         }
 
-        // Decompress .gz → .sqlite
-        if let Err(e) = decompress_gz(&tmp_gz, &tmp_sqlite) {
-            let _ = std::fs::remove_file(&tmp_gz);
-            let _ = std::fs::remove_file(&tmp_sqlite);
-            file_pb.set_style(style_done());
-            file_pb.finish_with_message(format!(
-                "{} décompression échouée: {}",
-                style("✗").yellow(),
-                e
-            ));
-            overall.inc(1);
-            continue;
-        }
-        let _ = std::fs::remove_file(&tmp_gz);
+        // If gzipped, decompress; otherwise use the downloaded file directly
+        let tmp_sqlite = if is_gz {
+            let tmp_out = cache.join(format!(".{local_filename}.tmp"));
+            if let Err(e) = decompress_gz(&tmp_download, &tmp_out) {
+                let _ = std::fs::remove_file(&tmp_download);
+                let _ = std::fs::remove_file(&tmp_out);
+                file_pb.set_style(style_done());
+                file_pb.finish_with_message(format!(
+                    "{} décompression échouée: {}",
+                    style("✗").yellow(),
+                    e
+                ));
+                overall.inc(1);
+                continue;
+            }
+            let _ = std::fs::remove_file(&tmp_download);
+            tmp_out
+        } else {
+            tmp_download
+        };
 
-        // Verify SQLite integrity of the decompressed file
-        if !sqlite_integrity_ok(&tmp_sqlite) {
-            let _ = std::fs::remove_file(&tmp_sqlite);
-            file_pb.set_style(style_done());
-            file_pb.finish_with_message(format!("{} corrompu, ignoré", style("✗").yellow()));
-            overall.inc(1);
-            continue;
-        }
-
-        let decompressed_size = std::fs::metadata(&tmp_sqlite).map(|m| m.len()).unwrap_or(0);
+        let final_size = std::fs::metadata(&tmp_sqlite).map(|m| m.len()).unwrap_or(0);
 
         std::fs::rename(&tmp_sqlite, &local_path)?;
         meta.file_checksums
             .insert(local_filename.to_string(), obj.crc32c.clone());
 
         file_pb.set_style(style_done());
-        file_pb.finish_with_message(format!(
-            "{} téléchargé ({} gz → {})",
-            style("✓").green(),
-            format_size(obj.size),
-            format_size(decompressed_size)
-        ));
+        if is_gz {
+            file_pb.finish_with_message(format!(
+                "{} téléchargé ({} gz → {})",
+                style("✓").green(),
+                format_size(obj.size),
+                format_size(final_size)
+            ));
+        } else {
+            file_pb.finish_with_message(format!(
+                "{} téléchargé ({})",
+                style("✓").green(),
+                format_size(final_size)
+            ));
+        }
 
         downloaded += 1;
-        downloaded_bytes += decompressed_size;
+        downloaded_bytes += final_size;
         overall.inc(1);
     }
 
@@ -614,6 +631,23 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     meta.remote_timestamp = remote_ts;
     meta.last_checked_at = Some(Utc::now().to_rfc3339());
     write_sync_metadata(&cache, &meta)?;
+
+    // Fetch and store the encryption key
+    match super::key::fetch_key_from_gcs(bucket, &token) {
+        Ok((version, key)) => {
+            super::key::store_key(&key)?;
+            eprintln!(
+                "{} Clé de chiffrement v{version} mise à jour dans le keychain.",
+                style("🔑").dim()
+            );
+        }
+        Err(_) => {
+            eprintln!(
+                "{} Clé de chiffrement non trouvée dans le bucket (cubes non chiffrés).",
+                style("⚠").yellow()
+            );
+        }
+    }
 
     eprintln!(
         "\n{} Synchronisation terminée — {} téléchargé(s) ({}), {} à jour. Cache : {}",
@@ -701,7 +735,7 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        assert!(sqlite_integrity_ok(&path));
+        assert!(sqlite_integrity_ok(&path, None));
     }
 
     #[test]
@@ -709,7 +743,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("bad.sqlite");
         std::fs::write(&path, b"this is not a sqlite file").unwrap();
-        assert!(!sqlite_integrity_ok(&path));
+        assert!(!sqlite_integrity_ok(&path, None));
     }
 
     #[test]
@@ -719,7 +753,7 @@ mod tests {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch("CREATE TABLE data (x TEXT);").unwrap();
         drop(conn);
-        assert!(!sqlite_integrity_ok(&path));
+        assert!(!sqlite_integrity_ok(&path, None));
     }
 
     #[test]

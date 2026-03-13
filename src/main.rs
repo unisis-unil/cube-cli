@@ -18,6 +18,7 @@ use std::process::ExitCode;
 ///     cube schema [--search TERM] [<cube> [<dimension>]]
 ///     cube query <cube> --group-by <dim> [flags]
 ///     cube sql <cube> "SELECT ..."
+///     cube key [--refresh | --delete]
 ///     cube sync
 ///
 /// EXAMPLES:
@@ -178,6 +179,26 @@ enum Commands {
         format: String,
     },
 
+    /// Manage the encryption key
+    ///
+    /// Without flags, shows key status. Use --refresh to fetch the latest
+    /// key from GCS, or --delete to remove it from the keychain.
+    ///
+    /// EXAMPLES:
+    ///     cube key                # Show key status
+    ///     cube key --refresh      # Fetch key from GCS
+    ///     cube key --delete       # Remove key from keychain
+    #[command(verbatim_doc_comment)]
+    Key {
+        /// Fetch the latest key from GCS
+        #[arg(long)]
+        refresh: bool,
+
+        /// Delete the key from the keychain
+        #[arg(long)]
+        delete: bool,
+    },
+
     /// Sync cubes from Google Cloud Storage
     ///
     /// Downloads the most recent cube snapshot from the GCS bucket.
@@ -229,6 +250,15 @@ fn uses_direct_path(command: &Commands) -> bool {
     name.contains('/') || name.contains('\\') || std::path::Path::new(&name).extension().is_some()
 }
 
+/// Returns true if the command will open a cube from the cache (needs encryption key).
+fn needs_encryption_key(command: &Commands) -> bool {
+    match command {
+        Commands::Query { .. } | Commands::Sql { .. } => !uses_direct_path(command),
+        Commands::Schema { name: Some(_), .. } => !uses_direct_path(command),
+        _ => false,
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -246,9 +276,11 @@ fn main() -> ExitCode {
     };
 
     let is_sync = matches!(command, Commands::Sync { .. });
+    let is_key = matches!(command, Commands::Key { .. });
+    let is_data_command = !is_sync && !is_key;
 
-    // Check for cube updates before schema/query/sql (not sync)
-    if !is_sync {
+    // Check for cube updates before schema/query/sql (not sync/key)
+    if is_data_command {
         commands::sync::check_for_updates(dev);
 
         // If the cache is empty and the command needs it, offer to sync first
@@ -271,16 +303,25 @@ fn main() -> ExitCode {
         }
     }
 
+    // Read encryption key from keychain only when opening a cube from the cache
+    let encryption_key = if needs_encryption_key(&command) {
+        commands::key::read_key().ok()
+    } else {
+        None
+    };
+    let key_ref = encryption_key.as_deref();
+
     let result = match command {
         Commands::Schema {
             name,
             dimension,
             search,
-        } => commands::schema::run(
+        } => commands::schema::run_with_key(
             name.as_deref(),
             dimension.as_deref(),
             search.as_deref(),
             dev,
+            key_ref,
         ),
         Commands::Query {
             file,
@@ -295,7 +336,7 @@ fn main() -> ExitCode {
             format,
         } => commands::schema::resolve_cube(file.to_str().unwrap_or_default(), dev).and_then(
             |path| {
-                commands::query::run(
+                commands::query::run_with_key(
                     &path,
                     &select,
                     &filter,
@@ -306,6 +347,7 @@ fn main() -> ExitCode {
                     &indicator,
                     no_aggregate,
                     &format,
+                    key_ref,
                 )
             },
         ),
@@ -314,7 +356,8 @@ fn main() -> ExitCode {
             query,
             format,
         } => commands::schema::resolve_cube(file.to_str().unwrap_or_default(), dev)
-            .and_then(|path| commands::sql::run(&path, &query, &format)),
+            .and_then(|path| commands::sql::run_with_key(&path, &query, &format, key_ref)),
+        Commands::Key { refresh, delete } => commands::key::run(refresh, delete, dev),
         Commands::Sync {
             prefix,
             cache_dir,
@@ -328,8 +371,8 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => {
             // Emit current date/time so LLM agents have temporal context
-            // (only for data commands, not sync)
-            if !is_sync {
+            // (only for data commands, not sync/key)
+            if is_data_command {
                 let now = Local::now();
                 eprintln!(
                     "cube: today is {} ({}), {} UTC{}",
