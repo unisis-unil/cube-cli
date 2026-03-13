@@ -255,6 +255,7 @@ fn needs_encryption_key(command: &Commands) -> bool {
     match command {
         Commands::Query { .. } | Commands::Sql { .. } => !uses_direct_path(command),
         Commands::Schema { name: Some(_), .. } => !uses_direct_path(command),
+        Commands::Schema { name: None, .. } => true, // catalogue opens all cached cubes
         _ => false,
     }
 }

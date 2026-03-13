@@ -63,8 +63,8 @@ pub fn get_row_count(conn: &Connection) -> Result<i64> {
     Ok(count)
 }
 
-pub fn get_numeric_stats(conn: &Connection, column: &str) -> Result<(f64, f64, i64)> {
-    let (min, max, distinct): (f64, f64, i64) = conn.query_row(
+pub fn get_numeric_stats(conn: &Connection, column: &str) -> Result<(Option<f64>, Option<f64>, i64)> {
+    let (min, max, distinct): (Option<f64>, Option<f64>, i64) = conn.query_row(
         &format!(
             "SELECT MIN(\"{0}\"), MAX(\"{0}\"), COUNT(DISTINCT \"{0}\") FROM data WHERE \"{0}\" IS NOT NULL",
             column
@@ -163,8 +163,24 @@ mod tests {
     fn test_get_numeric_stats() {
         let (_tmp, conn) = setup_db();
         let (min, max, distinct) = get_numeric_stats(&conn, "indicateur").unwrap();
-        assert_eq!(min, 10.0);
-        assert_eq!(max, 50.0);
+        assert_eq!(min, Some(10.0));
+        assert_eq!(max, Some(50.0));
         assert_eq!(distinct, 5);
+    }
+
+    #[test]
+    fn test_get_numeric_stats_all_null() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE data (val REAL);
+             INSERT INTO data VALUES (NULL);
+             INSERT INTO data VALUES (NULL);",
+        )
+        .unwrap();
+        let (min, max, distinct) = get_numeric_stats(&conn, "val").unwrap();
+        assert_eq!(min, None);
+        assert_eq!(max, None);
+        assert_eq!(distinct, 0);
     }
 }

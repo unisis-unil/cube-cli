@@ -657,7 +657,101 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
         skipped,
         cache.display()
     );
+
+    // Post-sync verification: open each cube and check schema + data table
+    let encryption_key = super::key::read_key().ok();
+    let key_ref = encryption_key.as_deref();
+    verify_cubes(&cache, key_ref)?;
+
     Ok(())
+}
+
+// ── Post-sync verification ──────────────────────────────────────────
+
+fn verify_cubes(cache: &Path, key: Option<&str>) -> Result<()> {
+    let mut cubes: Vec<std::path::PathBuf> = std::fs::read_dir(cache)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("sqlite"))
+        .collect();
+    cubes.sort();
+
+    if cubes.is_empty() {
+        return Ok(());
+    }
+
+    eprintln!("\nVérification des cubes...");
+
+    let mut ok_count = 0u32;
+    let mut fail_count = 0u32;
+
+    for path in &cubes {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?");
+
+        match verify_single_cube(path, key) {
+            Ok(row_count) => {
+                ok_count += 1;
+                eprintln!(
+                    "  {} {} ({} lignes)",
+                    style("✓").green(),
+                    name,
+                    row_count
+                );
+            }
+            Err(e) => {
+                fail_count += 1;
+                eprintln!(
+                    "  {} {} : {}",
+                    style("✗").red(),
+                    name,
+                    e
+                );
+            }
+        }
+    }
+
+    eprintln!(
+        "\n{} Vérification : {ok_count} OK, {fail_count} en erreur sur {} cube(s).",
+        if fail_count == 0 {
+            style("✓").green().bold()
+        } else {
+            style("⚠").yellow().bold()
+        },
+        cubes.len()
+    );
+
+    if fail_count > 0 {
+        eprintln!(
+            "Les cubes en erreur peuvent être corrompus. Essayez 'cube sync --force' pour les retélécharger."
+        );
+    }
+
+    Ok(())
+}
+
+/// Verify a single cube: open with key, read schema metadata, check data table.
+fn verify_single_cube(path: &Path, key: Option<&str>) -> Result<i64> {
+    let conn = crate::db::open_with_key(path, key)?;
+
+    // Check metadata schema is readable
+    crate::db::read_metadata_schema(&conn)
+        .context("Schéma métadonnées illisible")?;
+
+    // Check data table exists and has columns
+    let columns = crate::db::get_table_columns(&conn, "data")
+        .context("Table 'data' inaccessible")?;
+    if columns.is_empty() {
+        bail!("Table 'data' sans colonnes");
+    }
+
+    // Check row count
+    let row_count = crate::db::get_row_count(&conn)
+        .context("Impossible de compter les lignes")?;
+
+    Ok(row_count)
 }
 
 #[cfg(test)]
@@ -873,5 +967,86 @@ mod tests {
         assert_eq!(objects[0].name, "cubes/2026-03-13T120000/cube_a.sqlite.gz");
         assert_eq!(objects[0].crc32c, "abc==");
         assert_eq!(objects[1].size, 200);
+    }
+
+    #[test]
+    fn test_verify_single_cube_valid() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("test.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO metadata VALUES ('schema', '{\"cube\": \"Test\", \"measure\": \"Count\"}');
+             CREATE TABLE data (\"Nom\" TEXT, indicateur REAL);
+             INSERT INTO data VALUES ('A', 1.0);
+             INSERT INTO data VALUES ('B', 2.0);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let row_count = verify_single_cube(&path, None).unwrap();
+        assert_eq!(row_count, 2);
+    }
+
+    #[test]
+    fn test_verify_single_cube_no_metadata() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("no_meta.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE data (x TEXT);").unwrap();
+        drop(conn);
+
+        assert!(verify_single_cube(&path, None).is_err());
+    }
+
+    #[test]
+    fn test_verify_single_cube_no_data_table() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("no_data.sqlite");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO metadata VALUES ('schema', '{\"cube\": \"Test\"}');",
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(verify_single_cube(&path, None).is_err());
+    }
+
+    #[test]
+    fn test_verify_single_cube_corrupted() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("corrupt.sqlite");
+        std::fs::write(&path, b"not a database").unwrap();
+
+        assert!(verify_single_cube(&path, None).is_err());
+    }
+
+    #[test]
+    fn test_verify_cubes_mixed() {
+        let tmp = TempDir::new().unwrap();
+
+        // Valid cube
+        let good = tmp.path().join("good.sqlite");
+        let conn = rusqlite::Connection::open(&good).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO metadata VALUES ('schema', '{\"cube\": \"Good\"}');
+             CREATE TABLE data (x TEXT, indicateur REAL);
+             INSERT INTO data VALUES ('A', 1.0);",
+        )
+        .unwrap();
+        drop(conn);
+
+        // Invalid cube
+        let bad = tmp.path().join("bad.sqlite");
+        std::fs::write(&bad, b"corrupted").unwrap();
+
+        // Non-sqlite file (should be ignored)
+        std::fs::write(tmp.path().join("readme.txt"), b"ignored").unwrap();
+
+        // verify_cubes should succeed (it reports but doesn't fail)
+        assert!(verify_cubes(tmp.path(), None).is_ok());
     }
 }

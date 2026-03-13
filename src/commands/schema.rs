@@ -261,6 +261,9 @@ fn build_schema_with_key(file: &Path, key: Option<&str>) -> Result<Value> {
             info["min"] = json!(min);
             info["max"] = json!(max);
             info["distinct_count"] = json!(distinct);
+            if min.is_none() {
+                info["note"] = json!("all values are NULL");
+            }
         }
 
         // Enrich with description and parent from metadata
@@ -605,5 +608,35 @@ mod tests {
         assert_eq!(normalize_for_search("Réussite"), "reussite");
         assert_eq!(normalize_for_search("étudiants"), "etudiants");
         assert_eq!(normalize_for_search("BACHELOR"), "bachelor");
+    }
+
+    #[test]
+    fn test_build_schema_all_null_column() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO metadata VALUES ('schema', '{
+                 "cube": "NullTest",
+                 "measure": "Count",
+                 "indicator_column": "indicateur",
+                 "aggregation": "SUM",
+                 "dimensions": []
+             }');
+             CREATE TABLE data ("Date" REAL, "Nom" TEXT, indicateur REAL);
+             INSERT INTO data VALUES (NULL, 'A', 1.0);
+             INSERT INTO data VALUES (NULL, 'B', 2.0);"#,
+        )
+        .unwrap();
+
+        let schema = build_schema(tmp.path()).unwrap();
+        let dims = schema["dimensions"].as_array().unwrap();
+        assert_eq!(dims.len(), 2);
+
+        let date = dims.iter().find(|d| d["name"] == "Date").unwrap();
+        assert!(date["min"].is_null());
+        assert!(date["max"].is_null());
+        assert_eq!(date["distinct_count"], 0);
+        assert_eq!(date["note"], "all values are NULL");
     }
 }
