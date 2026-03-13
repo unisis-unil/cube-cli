@@ -81,7 +81,7 @@ fn test_schema_json_output() {
     assert_eq!(json["cube"], "TestCube");
     assert_eq!(json["row_count"], 8);
     let dims = json["dimensions"].as_array().unwrap();
-    assert_eq!(dims.len(), 3);
+    assert_eq!(dims.len(), 2); // indicator excluded
     // Low cardinality dimensions should have "values" not "sample_values"
     let fac = &dims[0];
     assert_eq!(fac["name"], "Faculté");

@@ -56,7 +56,13 @@ pub fn run(name: Option<&str>, dimension: Option<&str>, dev: bool) -> Result<()>
 
 fn list_dimension_values(file: &Path, dimension: &str) -> Result<Value> {
     let conn = db::open(file)?;
+    let schema = db::read_metadata_schema(&conn)?;
     let columns = db::get_table_columns(&conn, "data")?;
+
+    let indicator_col = schema
+        .get("indicator_column")
+        .and_then(|v| v.as_str())
+        .unwrap_or("indicateur");
 
     let col = columns.iter().find(|c| c.name == dimension);
     if col.is_none() {
@@ -64,7 +70,7 @@ fn list_dimension_values(file: &Path, dimension: &str) -> Result<Value> {
             "Dimension '{dimension}' introuvable. Dimensions disponibles : {}",
             columns
                 .iter()
-                .filter(|c| c.col_type.to_uppercase() == "TEXT")
+                .filter(|c| c.name != indicator_col)
                 .map(|c| c.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -129,9 +135,14 @@ fn build_schema_summary(file: &Path) -> Result<Value> {
     let row_count = db::get_row_count(&conn)?;
     let columns = db::get_table_columns(&conn, "data")?;
 
+    let indicator_col = schema
+        .get("indicator_column")
+        .and_then(|v| v.as_str())
+        .unwrap_or("indicateur");
+
     let dimensions: Vec<&str> = columns
         .iter()
-        .filter(|c| c.col_type.to_uppercase() == "TEXT")
+        .filter(|c| c.name != indicator_col)
         .map(|c| c.name.as_str())
         .collect();
 
@@ -160,6 +171,12 @@ pub(crate) fn build_schema(file: &Path) -> Result<Value> {
     let columns = db::get_table_columns(&conn, "data")?;
     let row_count = db::get_row_count(&conn)?;
 
+    let indicator_col = schema
+        .get("indicator_column")
+        .and_then(|v| v.as_str())
+        .unwrap_or("indicateur")
+        .to_string();
+
     // Build a lookup from the metadata dimensions array
     let meta_dims: Vec<Value> = schema
         .get("dimensions")
@@ -169,11 +186,17 @@ pub(crate) fn build_schema(file: &Path) -> Result<Value> {
 
     let mut dim_infos = Vec::new();
     for col in &columns {
+        if col.name == indicator_col {
+            continue;
+        }
+
+        let col_type_upper = col.col_type.to_uppercase();
         let mut info = json!({
             "name": col.name,
             "type": col.col_type,
         });
-        if col.col_type.to_uppercase() == "TEXT" {
+
+        if col_type_upper == "TEXT" {
             let distinct = db::get_distinct_count(&conn, &col.name)?;
             info["distinct_count"] = json!(distinct);
 
@@ -184,19 +207,26 @@ pub(crate) fn build_schema(file: &Path) -> Result<Value> {
                 let samples = db::get_sample_values(&conn, &col.name, SAMPLE_SIZE)?;
                 info["sample_values"] = json!(samples);
             }
+        } else {
+            // Numeric columns: provide min, max, distinct_count
+            let (min, max, distinct) = db::get_numeric_stats(&conn, &col.name)?;
+            info["min"] = json!(min);
+            info["max"] = json!(max);
+            info["distinct_count"] = json!(distinct);
+        }
 
-            // Enrich with description and parent from metadata
-            if let Some(meta) = meta_dims.iter().find(|d| d["name"] == col.name) {
-                let desc = meta.get("description").unwrap_or(&Value::Null);
-                if !desc.is_null() && desc.as_object().map_or(true, |o| !o.is_empty()) {
-                    info["description"] = desc.clone();
-                }
-                let parent = meta.get("parent").unwrap_or(&Value::Null);
-                if !parent.is_null() && parent.as_object().map_or(true, |o| !o.is_empty()) {
-                    info["parent"] = parent.clone();
-                }
+        // Enrich with description and parent from metadata
+        if let Some(meta) = meta_dims.iter().find(|d| d["name"] == col.name) {
+            let desc = meta.get("description").unwrap_or(&Value::Null);
+            if !desc.is_null() && desc.as_object().map_or(true, |o| !o.is_empty()) {
+                info["description"] = desc.clone();
+            }
+            let parent = meta.get("parent").unwrap_or(&Value::Null);
+            if !parent.is_null() && parent.as_object().map_or(true, |o| !o.is_empty()) {
+                info["parent"] = parent.clone();
             }
         }
+
         dim_infos.push(info);
     }
 
@@ -264,8 +294,8 @@ mod tests {
         let tmp = create_test_db();
         let schema = build_schema(tmp.path()).unwrap();
         let dims = schema["dimensions"].as_array().unwrap();
-        // 2 TEXT + 1 REAL = 3 entries
-        assert_eq!(dims.len(), 3);
+        // 2 TEXT columns only (indicator excluded)
+        assert_eq!(dims.len(), 2);
 
         // TEXT column with low cardinality → "values" + metadata enrichment
         let fac = &dims[0];
@@ -280,12 +310,6 @@ mod tests {
         let typ = &dims[1];
         assert_eq!(typ["name"], "Type");
         assert_eq!(typ["description"], "Type de surface");
-
-        // REAL column stays simple
-        let ind = &dims[2];
-        assert_eq!(ind["name"], "indicateur");
-        assert_eq!(ind["type"], "REAL");
-        assert!(ind.get("distinct_count").is_none() || ind["distinct_count"].is_null());
     }
 
     #[test]
@@ -294,6 +318,7 @@ mod tests {
         let schema = build_schema(tmp.path()).unwrap();
         // dimensions should be the merged array, not the old metadata one
         let dims = schema["dimensions"].as_array().unwrap();
+        assert_eq!(dims.len(), 2); // indicator excluded
         // Each entry has a "type" field (from columns), not just name/description/parent
         assert!(dims[0].get("type").is_some());
     }
@@ -369,5 +394,71 @@ mod tests {
         let tmp = create_test_db();
         let result = run(Some(tmp.path().to_str().unwrap()), Some("Nope"), false);
         assert!(result.is_err());
+    }
+
+    fn create_mixed_type_db() -> tempfile::NamedTempFile {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT);
+             INSERT INTO metadata VALUES ('schema', '{
+                 "cube": "Personnel",
+                 "measure": "Effectif",
+                 "measure_description": "nombre de personnes",
+                 "cube_description": "Effectifs du personnel",
+                 "indicator_column": "indicateur",
+                 "aggregation": "SUM",
+                 "dimensions": [
+                     {"name": "Faculté", "description": null, "parent": null}
+                 ]
+             }');
+             CREATE TABLE data (
+                 "Faculté" TEXT,
+                 "Age" INTEGER,
+                 "Année civile" REAL,
+                 "Taux de contrat" REAL,
+                 indicateur REAL
+             );
+             INSERT INTO data VALUES ('FBM', 35, 2023.0, 0.8, 1.0);
+             INSERT INTO data VALUES ('FBM', 42, 2023.0, 1.0, 1.0);
+             INSERT INTO data VALUES ('SSP', 28, 2024.0, 0.5, 1.0);"#,
+        )
+        .unwrap();
+        tmp
+    }
+
+    #[test]
+    fn test_build_schema_includes_numeric_dimensions() {
+        let tmp = create_mixed_type_db();
+        let schema = build_schema(tmp.path()).unwrap();
+        let dims = schema["dimensions"].as_array().unwrap();
+        // 1 TEXT + 3 numeric (indicator excluded)
+        assert_eq!(dims.len(), 4);
+
+        let names: Vec<&str> = dims.iter().map(|d| d["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"Age"));
+        assert!(names.contains(&"Année civile"));
+        assert!(names.contains(&"Taux de contrat"));
+        assert!(!names.contains(&"indicateur"));
+
+        // Numeric columns have min/max/distinct_count
+        let age = dims.iter().find(|d| d["name"] == "Age").unwrap();
+        assert_eq!(age["type"], "INTEGER");
+        assert_eq!(age["min"], 28.0);
+        assert_eq!(age["max"], 42.0);
+        assert_eq!(age["distinct_count"], 3);
+    }
+
+    #[test]
+    fn test_build_schema_summary_includes_numeric_dimensions() {
+        let tmp = create_mixed_type_db();
+        let summary = build_schema_summary(tmp.path()).unwrap();
+        assert_eq!(summary["dimension_count"], 4);
+        let dims = summary["dimensions"].as_array().unwrap();
+        let names: Vec<&str> = dims.iter().map(|d| d.as_str().unwrap()).collect();
+        assert!(names.contains(&"Age"));
+        assert!(names.contains(&"Année civile"));
+        assert!(names.contains(&"Taux de contrat"));
+        assert!(!names.contains(&"indicateur"));
     }
 }

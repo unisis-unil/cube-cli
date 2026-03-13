@@ -68,6 +68,18 @@ pub fn get_sample_values(conn: &Connection, column: &str, limit: usize) -> Resul
     Ok(values)
 }
 
+pub fn get_numeric_stats(conn: &Connection, column: &str) -> Result<(f64, f64, i64)> {
+    let (min, max, distinct): (f64, f64, i64) = conn.query_row(
+        &format!(
+            "SELECT MIN(\"{0}\"), MAX(\"{0}\"), COUNT(DISTINCT \"{0}\") FROM data WHERE \"{0}\" IS NOT NULL",
+            column
+        ),
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    Ok((min, max, distinct))
+}
+
 pub fn get_all_distinct_values(conn: &Connection, column: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT DISTINCT \"{}\" FROM data WHERE \"{}\" IS NOT NULL ORDER BY \"{}\"",
@@ -174,5 +186,14 @@ mod tests {
         assert_eq!(cols.len(), 2);
         assert_eq!(cols[0].name, "key");
         assert_eq!(cols[1].name, "value");
+    }
+
+    #[test]
+    fn test_get_numeric_stats() {
+        let (_tmp, conn) = setup_db();
+        let (min, max, distinct) = get_numeric_stats(&conn, "indicateur").unwrap();
+        assert_eq!(min, 10.0);
+        assert_eq!(max, 50.0);
+        assert_eq!(distinct, 5);
     }
 }
