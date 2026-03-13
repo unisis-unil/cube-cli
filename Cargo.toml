@@ -1,6 +1,6 @@
 [package]
 name = "cube"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2021"
 description = "CLI pour interroger les cubes SQLite de la plateforme UNISIS S3 (Statistiques en Self-Service)"
 

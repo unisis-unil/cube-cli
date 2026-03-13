@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use reqwest::blocking::Client;
 use serde::Deserialize;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 const GCS_API: &str = "https://storage.googleapis.com/storage/v1";
