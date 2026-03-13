@@ -1,4 +1,4 @@
-# cube — UNISIS Data Warehouse CLI
+# cube — UNISIS S3 Cubes CLI
 
 default:
     @just --list

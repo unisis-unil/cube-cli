@@ -2,7 +2,7 @@
 name = "cube"
 version = "0.1.0"
 edition = "2021"
-description = "CLI pour interroger des fichiers SQLite exportés depuis le datawarehouse UNISIS"
+description = "CLI pour interroger les cubes SQLite de la plateforme UNISIS S3 (Statistiques en Self-Service)"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

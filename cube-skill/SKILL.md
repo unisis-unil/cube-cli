@@ -1,19 +1,19 @@
 ---
 name: cube
 description: >
-  Interroger les données du datawarehouse UNISIS (Université de Lausanne) via le CLI `cube`.
-  Utiliser ce skill dès que l'utilisateur pose une question sur les données de l'UNIL
-  (étudiants, infrastructures, surfaces, facultés, effectifs, indicateurs, etc.),
-  mentionne « cube », « S3 » (statistiques en self-service), ou demande des chiffres
-  issus du datawarehouse UNISIS. Utiliser aussi quand l'utilisateur veut synchroniser,
-  explorer ou interroger des cubes SQLite UNISIS.
+  Interroger les cubes UNISIS S3 (Statistiques en Self-Service) de l'Université de Lausanne
+  via le CLI `cube`. Utiliser ce skill dès que l'utilisateur pose une question sur les
+  données de l'UNIL (étudiants, infrastructures, surfaces, facultés, effectifs, indicateurs,
+  etc.), mentionne « cube », « S3 » (statistiques en self-service), ou demande des chiffres
+  issus des cubes UNISIS. Utiliser aussi quand l'utilisateur veut synchroniser, explorer ou
+  interroger des cubes SQLite UNISIS.
 user-invocable: true
 ---
 
-# cube — CLI de requêtage du datawarehouse UNISIS
+# cube — CLI de requêtage des cubes UNISIS S3
 
-Le CLI `cube` permet d'interroger des fichiers SQLite exportés depuis le datawarehouse
-de l'Université de Lausanne.
+Le CLI `cube` permet d'interroger des fichiers SQLite exportés depuis la plateforme
+UNISIS S3 (Statistiques en Self-Service) de l'Université de Lausanne.
 
 ## Principe fondamental
 

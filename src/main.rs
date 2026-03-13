@@ -8,9 +8,9 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// cube — UNISIS Data Warehouse CLI
+/// cube — UNISIS S3 Cubes CLI
 ///
-/// Query SQLite cubes exported from the UNISIS data warehouse
+/// Query SQLite cubes from the UNISIS S3 (Statistiques en Self-Service) platform
 /// at Université de Lausanne.
 ///
 /// USAGE:
