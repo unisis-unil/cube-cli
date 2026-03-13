@@ -1,0 +1,76 @@
+name: Update Homebrew formula
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get release info
+        id: release
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          for target in x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-musl; do
+            URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/cube-${target}.tar.gz.sha256"
+            SHA=$(curl -fsSL "${URL}" | awk '{print $1}')
+            KEY=$(echo "${target}" | tr '-' '_')
+            echo "sha256_${KEY}=${SHA}" >> "$GITHUB_OUTPUT"
+          done
+
+      - uses: actions/checkout@v4
+        with:
+          repository: unisis-unil/homebrew-tools
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tools
+
+      - name: Update formula
+        run: |
+          cat > homebrew-tools/Formula/cube.rb << 'RUBY'
+          class Cube < Formula
+            desc "CLI pour interroger les cubes SQLite UNISIS S3 (Statistiques en Self-Service)"
+            homepage "https://github.com/unisis-unil/cube-cli"
+            version "${{ steps.release.outputs.version }}"
+            license "MIT"
+
+            on_macos do
+              on_intel do
+                url "https://github.com/unisis-unil/cube-cli/releases/download/${GITHUB_REF_NAME}/cube-x86_64-apple-darwin.tar.gz"
+                sha256 "${{ steps.release.outputs.sha256_x86_64_apple_darwin }}"
+              end
+
+              on_arm do
+                url "https://github.com/unisis-unil/cube-cli/releases/download/${GITHUB_REF_NAME}/cube-aarch64-apple-darwin.tar.gz"
+                sha256 "${{ steps.release.outputs.sha256_aarch64_apple_darwin }}"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "https://github.com/unisis-unil/cube-cli/releases/download/${GITHUB_REF_NAME}/cube-x86_64-unknown-linux-musl.tar.gz"
+                sha256 "${{ steps.release.outputs.sha256_x86_64_unknown_linux_musl }}"
+              end
+            end
+
+            def install
+              bin.install "cube"
+            end
+
+            test do
+              assert_match "cube", shell_output("#{bin}/cube --version")
+            end
+          end
+          RUBY
+
+      - name: Commit and push
+        working-directory: homebrew-tools
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/cube.rb
+          git commit -m "cube ${{ steps.release.outputs.version }}"
+          git push
