@@ -63,7 +63,8 @@ fn test_no_args() {
     Command::cargo_bin("cube")
         .unwrap()
         .assert()
-        .failure();
+        .success()
+        .stdout(predicate::str::contains("cube"));
 }
 
 // --- Schema ---

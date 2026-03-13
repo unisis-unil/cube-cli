@@ -49,7 +49,7 @@ struct Cli {
     dev: bool,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -203,14 +203,26 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let dev = cli.dev;
-    let is_sync = matches!(cli.command, Commands::Sync { .. });
+
+    let command = match cli.command {
+        Some(cmd) => cmd,
+        None => {
+            // No subcommand: print help (same as `cube --help`)
+            use clap::CommandFactory;
+            Cli::command().print_help().ok();
+            println!();
+            return ExitCode::SUCCESS;
+        }
+    };
+
+    let is_sync = matches!(command, Commands::Sync { .. });
 
     // Check for cube updates before schema/query/sql (not sync)
     if !is_sync {
         commands::sync::check_for_updates(dev);
     }
 
-    let result = match cli.command {
+    let result = match command {
         Commands::Schema { name, dimension, search } => {
             commands::schema::run(name.as_deref(), dimension.as_deref(), search.as_deref(), dev)
         }
