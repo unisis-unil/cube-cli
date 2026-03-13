@@ -104,10 +104,17 @@ pub(crate) fn build_order_by(specs: &[String]) -> String {
     let parts: Vec<String> = specs
         .iter()
         .map(|part| {
-            let tokens: Vec<&str> = part.trim().splitn(2, ':').collect();
-            let col = tokens[0].trim();
-            let dir = tokens.get(1).map(|d| d.trim().to_uppercase()).unwrap_or_else(|| "ASC".to_string());
-            format!("\"{}\" {}", col, dir)
+            let trimmed = part.trim();
+            // Split on the last ':' only if the suffix is asc/desc,
+            // so column names containing ':' are preserved.
+            if let Some(pos) = trimmed.rfind(':') {
+                let suffix = trimmed[pos + 1..].trim().to_uppercase();
+                if suffix == "ASC" || suffix == "DESC" {
+                    let col = trimmed[..pos].trim();
+                    return format!("\"{}\" {}", col, suffix);
+                }
+            }
+            format!("\"{}\" ASC", trimmed)
         })
         .collect();
     format!(" ORDER BY {}", parts.join(", "))
@@ -438,6 +445,23 @@ mod tests {
         assert_eq!(
             build_order_by(&["Faculté:asc".to_string(), "indicateur:desc".to_string()]),
             " ORDER BY \"Faculté\" ASC, \"indicateur\" DESC"
+        );
+    }
+
+    #[test]
+    fn test_build_order_by_column_with_colon() {
+        // Column names containing ':' must not be split
+        assert_eq!(
+            build_order_by(&["Cohorte (périmètre: Niveau d'étude par division facultaire):desc".to_string()]),
+            " ORDER BY \"Cohorte (périmètre: Niveau d'étude par division facultaire)\" DESC"
+        );
+    }
+
+    #[test]
+    fn test_build_order_by_column_with_colon_no_direction() {
+        assert_eq!(
+            build_order_by(&["Cohorte (périmètre: Niveau)".to_string()]),
+            " ORDER BY \"Cohorte (périmètre: Niveau)\" ASC"
         );
     }
 
