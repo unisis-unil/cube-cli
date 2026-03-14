@@ -2,6 +2,7 @@ mod commands;
 mod db;
 mod error;
 mod formatter;
+mod version;
 
 use chrono::Local;
 use clap::{Parser, Subcommand};
@@ -425,6 +426,7 @@ fn main() -> ExitCode {
                     now.format("%:z"),
                 );
             }
+            version::check_for_new_version();
             ExitCode::SUCCESS
         }
         Err(e) => {
