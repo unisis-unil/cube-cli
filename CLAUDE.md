@@ -3,7 +3,7 @@
 ## VCS — Jujutsu (jj)
 
 Ce repo est géré avec Jujutsu (colocalisé git+jj). Ne JAMAIS utiliser
-de commandes git directement.
+de commandes git directement, sauf pour pousser les tags (voir Release).
 
 ### Workflow commit
 
@@ -22,4 +22,4 @@ de commandes git directement.
 1. Bumper `version` dans `Cargo.toml`
 2. `cargo check` pour mettre à jour `Cargo.lock`
 3. `jj describe -m "release: vX.Y.Z"` puis `jj new` et `jj bookmark set main -r @-` et `jj git push`
-4. `jj tag set vX.Y.Z -r main` puis `jj git push --tag 'glob:vX.Y.Z'`
+4. `jj tag set vX.Y.Z -r main` puis `git push origin vX.Y.Z` (`jj git push` ne supporte pas encore les tags)
