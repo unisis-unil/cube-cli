@@ -637,13 +637,13 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
         Ok((version, key)) => {
             super::key::store_key(&key)?;
             eprintln!(
-                "{} Clé de chiffrement v{version} mise à jour dans le keychain.",
+                "\n{} Clé de chiffrement v{version} mise à jour dans le keychain.",
                 style("🔑").dim()
             );
         }
         Err(_) => {
             eprintln!(
-                "{} Clé de chiffrement non trouvée dans le bucket (cubes non chiffrés).",
+                "\n{} Clé de chiffrement non trouvée dans le bucket (cubes non chiffrés).",
                 style("⚠").yellow()
             );
         }
