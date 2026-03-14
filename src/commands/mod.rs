@@ -1,3 +1,4 @@
+pub mod feedback;
 pub mod key;
 pub mod query;
 pub mod schema;

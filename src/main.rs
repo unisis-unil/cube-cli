@@ -20,6 +20,7 @@ use std::process::ExitCode;
 ///     cube sql <cube> "SELECT ..."
 ///     cube key [--refresh | --delete]
 ///     cube sync
+///     cube feedback "message"
 ///
 /// EXAMPLES:
 ///     cube schema
@@ -30,6 +31,7 @@ use std::process::ExitCode;
 ///     cube query etudiants_nombre_d_etudiants_plan_principal --group-by Faculté --group-by Sexe --arrange indicateur:desc --limit 10 --format json
 ///     cube sql infrastructures_surface "SELECT Faculté, SUM(indicateur) FROM data GROUP BY Faculté"
 ///     cube sync
+///     cube feedback "La commande query est très pratique !"
 ///
 /// CACHE:
 ///     ~/.unisis-cube/cache/        Local cache for PROD cubes
@@ -167,6 +169,25 @@ enum Commands {
     /// interface handles quoting, aggregation and column names automatically,
     /// which prevents errors. Use 'cube sql' only when 'cube query' cannot
     /// express the needed logic (e.g. sub-queries, CASE, HAVING, joins).
+    ///
+    /// TABLES:
+    ///     data       Dimension columns (TEXT) + indicator column (numeric).
+    ///                Always quote accented column names, e.g. "Faculté".
+    ///     metadata   key='schema' → JSON description of the cube.
+    ///
+    /// EXAMPLES:
+    ///     # Aggregate by one dimension
+    ///     cube sql infrastructures_surface "SELECT \"Faculté\", SUM(indicateur) FROM data GROUP BY \"Faculté\""
+    ///
+    ///     # CASE expression (not possible with 'cube query')
+    ///     cube sql infrastructures_surface "SELECT CASE WHEN \"Type\"='Bureau' THEN 'Bureau' ELSE 'Autre' END AS cat, SUM(indicateur) FROM data GROUP BY cat"
+    ///
+    ///     # Read cube metadata
+    ///     cube sql infrastructures_surface "SELECT * FROM metadata"
+    ///
+    ///     # Output as JSON
+    ///     cube sql infrastructures_surface "SELECT * FROM data LIMIT 5" --format json
+    #[command(verbatim_doc_comment)]
     Sql {
         /// Cube name or path to .sqlite file
         file: PathBuf,
@@ -197,6 +218,25 @@ enum Commands {
         /// Delete the key from the keychain
         #[arg(long)]
         delete: bool,
+    },
+
+    /// Send feedback about cube-cli to the UNISIS team
+    ///
+    /// Sends an email to unisis@unil.ch with your feedback message.
+    /// The sender is automatically set to your GCP authenticated email.
+    /// Requires GCP authentication (gcloud auth application-default login).
+    ///
+    /// Use this to report bugs, suggest features, or share comments about
+    /// the CLI. The email includes your identity and the CLI version.
+    ///
+    /// EXAMPLES:
+    ///     cube feedback "La commande query est très pratique !"
+    ///     cube feedback "Bug : la commande schema plante avec le cube X"
+    ///     echo "Mon feedback détaillé" | cube feedback
+    #[command(verbatim_doc_comment)]
+    Feedback {
+        /// Feedback message (or pipe via stdin)
+        message: Option<String>,
     },
 
     /// Sync cubes from Google Cloud Storage
@@ -278,7 +318,8 @@ fn main() -> ExitCode {
 
     let is_sync = matches!(command, Commands::Sync { .. });
     let is_key = matches!(command, Commands::Key { .. });
-    let is_data_command = !is_sync && !is_key;
+    let is_feedback = matches!(command, Commands::Feedback { .. });
+    let is_data_command = !is_sync && !is_key && !is_feedback;
 
     // Check for cube updates before schema/query/sql (not sync/key)
     if is_data_command {
@@ -359,6 +400,7 @@ fn main() -> ExitCode {
         } => commands::schema::resolve_cube(file.to_str().unwrap_or_default(), dev)
             .and_then(|path| commands::sql::run_with_key(&path, &query, &format, key_ref)),
         Commands::Key { refresh, delete } => commands::key::run(refresh, delete, dev),
+        Commands::Feedback { message } => commands::feedback::run(message.as_deref(), dev),
         Commands::Sync {
             prefix,
             cache_dir,
