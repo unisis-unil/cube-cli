@@ -7,7 +7,8 @@ CLI pour interroger les cubes SQLite de la plateforme **UNISIS S3** (Statistique
 - **Catalogue et exploration** — Parcours progressif des cubes disponibles, avec recherche par regex insensible aux accents
 - **Requêtes structurées** — Agrégation, filtrage, tri et limitation via des flags typés (pas besoin d'écrire du SQL)
 - **SQL brut** — Pour les requêtes complexes impossibles à exprimer avec les flags
-- **Synchronisation** — Téléchargement incrémental depuis Google Cloud Storage avec vérification CRC32C et intégrité SQLite
+- **Synchronisation** — Téléchargement incrémental depuis Google Cloud Storage avec vérification CRC32C et validation post-sync de chaque cube
+- **Chiffrement au repos** — Les cubes sont chiffrés avec SQLCipher (AES-256) ; la clé est stockée dans le keychain de l'OS (macOS Keychain / Linux keyring)
 
 ## Prérequis
 
@@ -81,6 +82,14 @@ cube query infrastructures_surface --group-by Faculté --format json
 cube sql infrastructures_surface "SELECT Faculté, SUM(indicateur) FROM data GROUP BY Faculté"
 ```
 
+### Gérer la clé de chiffrement
+
+```bash
+cube key              # Afficher le statut de la clé
+cube key --refresh    # Récupérer la clé depuis GCS
+cube key --delete     # Supprimer la clé du keychain
+```
+
 ### Synchroniser les cubes
 
 ```bash
@@ -88,6 +97,8 @@ cube sync             # Télécharger/mettre à jour depuis PROD
 cube --dev sync       # Depuis l'environnement DEV
 cube sync --force     # Forcer le re-téléchargement complet
 ```
+
+La synchronisation récupère automatiquement la clé de chiffrement et vérifie l'intégrité de chaque cube téléchargé.
 
 ## Cache local
 
