@@ -661,7 +661,15 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     // Post-sync verification: open each cube and check schema + data table
     let encryption_key = super::key::read_key().ok();
     let key_ref = encryption_key.as_deref();
-    verify_cubes(&cache, key_ref)?;
+    let fail_count = verify_cubes(&cache, key_ref, &mut meta)?;
+
+    if fail_count > 0 {
+        // Persist invalidated checksums so next sync retries failed cubes
+        write_sync_metadata(&cache, &meta)?;
+        bail!(
+            "{fail_count} cube(s) en erreur. Exécutez 'cube sync' pour retélécharger les cubes corrompus."
+        );
+    }
 
     Ok(())
 }
@@ -670,7 +678,7 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
 
 pub(crate) const CATALOGUE_FILE: &str = ".catalogue.json";
 
-fn verify_cubes(cache: &Path, key: Option<&str>) -> Result<()> {
+fn verify_cubes(cache: &Path, key: Option<&str>, meta: &mut SyncMetadata) -> Result<u32> {
     let mut cubes: Vec<std::path::PathBuf> = std::fs::read_dir(cache)?
         .flatten()
         .map(|e| e.path())
@@ -679,7 +687,7 @@ fn verify_cubes(cache: &Path, key: Option<&str>) -> Result<()> {
     cubes.sort();
 
     if cubes.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
     eprintln!("\nVérification des cubes...");
@@ -690,6 +698,10 @@ fn verify_cubes(cache: &Path, key: Option<&str>) -> Result<()> {
 
     for path in &cubes {
         let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
 
         match verify_and_catalogue_cube(path, key) {
             Ok((row_count, entry)) => {
@@ -700,6 +712,8 @@ fn verify_cubes(cache: &Path, key: Option<&str>) -> Result<()> {
             Err(e) => {
                 fail_count += 1;
                 eprintln!("  {} {} : {}", style("✗").red(), name, e);
+                // Invalidate checksum so next sync retries this cube
+                meta.file_checksums.remove(filename);
             }
         }
     }
@@ -726,11 +740,12 @@ fn verify_cubes(cache: &Path, key: Option<&str>) -> Result<()> {
 
     if fail_count > 0 {
         eprintln!(
-            "Les cubes en erreur peuvent être corrompus. Essayez 'cube sync --force' pour les retélécharger."
+            "Les cubes en erreur peuvent être corrompus. \
+             Un prochain 'cube sync' retéléchargera les cubes affectés."
         );
     }
 
-    Ok(())
+    Ok(fail_count)
 }
 
 /// Verify a single cube and build its catalogue entry.
@@ -1064,7 +1079,16 @@ mod tests {
         // Non-sqlite file (should be ignored)
         std::fs::write(tmp.path().join("readme.txt"), b"ignored").unwrap();
 
-        // verify_cubes should succeed (it reports but doesn't fail)
-        assert!(verify_cubes(tmp.path(), None).is_ok());
+        let mut meta = SyncMetadata::default();
+        meta.file_checksums
+            .insert("good.sqlite".to_string(), "aaa==".to_string());
+        meta.file_checksums
+            .insert("bad.sqlite".to_string(), "bbb==".to_string());
+
+        let fail_count = verify_cubes(tmp.path(), None, &mut meta).unwrap();
+        assert_eq!(fail_count, 1);
+        // Checksum of the failed cube should be invalidated
+        assert!(meta.file_checksums.contains_key("good.sqlite"));
+        assert!(!meta.file_checksums.contains_key("bad.sqlite"));
     }
 }
