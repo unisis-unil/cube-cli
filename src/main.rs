@@ -29,7 +29,7 @@ use std::process::ExitCode;
 ///     cube schema infrastructures_surface
 ///     cube schema infrastructures_surface "Faculté"
 ///     cube query etudiants_nombre_d_etudiants_plan_principal --group-by Faculté --filter Semestre=2025A
-///     cube query etudiants_nombre_d_etudiants_plan_principal --group-by Faculté --group-by Sexe --arrange indicateur:desc --limit 10 --format json
+///     cube query etudiants_nombre_d_etudiants_plan_principal --group-by Faculté Sexe --arrange indicateur:desc --limit 10 --format json
 ///     cube sql infrastructures_surface "SELECT Faculté, SUM(indicateur) FROM data GROUP BY Faculté"
 ///     cube sync
 ///     cube feedback "La commande query est très pratique !"
@@ -108,15 +108,26 @@ enum Commands {
     ///     --filter on DIFFERENT columns → AND (WHERE c1=v1 AND c2=v2)
     ///     --exclude follows the same logic (NOT IN / AND NOT IN)
     ///
+    /// MULTI-VALUE FLAGS:
+    ///     All list flags (--group-by, --filter, --exclude, --select, --arrange)
+    ///     accept multiple values in two equivalent ways:
+    ///       --group-by Faculté Sexe            (space-separated after one flag)
+    ///       --group-by Faculté --group-by Sexe  (repeated flag)
+    ///     Both forms can be mixed freely.
+    ///
     /// EXAMPLES:
     ///     # Group by Faculté
     ///     cube query infrastructures_surface --group-by Faculté
     ///
+    ///     # Multiple group-by (two equivalent forms)
+    ///     cube query infrastructures_surface --group-by Faculté Sexe
+    ///     cube query infrastructures_surface --group-by Faculté --group-by Sexe
+    ///
     ///     # Two faculties (OR): Faculté IN ('FBM', 'SSP')
-    ///     cube query infrastructures_surface --group-by Faculté --filter Faculté=FBM --filter Faculté=SSP
+    ///     cube query infrastructures_surface --group-by Faculté --filter Faculté=FBM Faculté=SSP
     ///
     ///     # Cross-dimension (AND): Faculté='FBM' AND Type='Bureau'
-    ///     cube query infrastructures_surface --group-by Faculté --group-by Type --filter Faculté=FBM --filter Type=Bureau
+    ///     cube query infrastructures_surface --group-by Faculté Type --filter Faculté=FBM Type=Bureau
     ///
     ///     # Exclude labs, sorted descending, top 5
     ///     cube query infrastructures_surface --group-by Faculté --exclude Type=Labo --arrange indicateur:desc --limit 5
@@ -127,24 +138,29 @@ enum Commands {
         /// Cube name or path to .sqlite file
         file: PathBuf,
 
-        /// Columns to display (repeatable, default: group-by columns + indicator)
-        #[arg(long, value_name = "COL")]
+        /// Columns to display (default: group-by columns + indicator).
+        /// Accepts multiple values: --select A B or --select A --select B
+        #[arg(long, num_args = 1.., value_name = "COL")]
         select: Vec<String>,
 
-        /// Include filter: col=val (repeatable, same column → OR)
-        #[arg(long, value_name = "EXPR")]
+        /// Include filter: col=val (same column → OR, different columns → AND).
+        /// Accepts multiple values: --filter A=1 B=2 or --filter A=1 --filter B=2
+        #[arg(long, num_args = 1.., value_name = "EXPR")]
         filter: Vec<String>,
 
-        /// Exclude filter: col=val (repeatable, same column → OR)
-        #[arg(long, value_name = "EXPR")]
+        /// Exclude filter: col=val (same column → OR, different columns → AND).
+        /// Accepts multiple values: --exclude A=1 B=2 or --exclude A=1 --exclude B=2
+        #[arg(long, num_args = 1.., value_name = "EXPR")]
         exclude: Vec<String>,
 
-        /// Group-by columns (repeatable, required unless --no-aggregate)
-        #[arg(long, value_name = "COL")]
+        /// Group-by columns (required unless --no-aggregate).
+        /// Accepts multiple values: --group-by A B or --group-by A --group-by B
+        #[arg(long, num_args = 1.., value_name = "COL")]
         group_by: Vec<String>,
 
-        /// Sort order: col or col:asc or col:desc (repeatable)
-        #[arg(long, value_name = "SPEC")]
+        /// Sort order: col or col:asc or col:desc.
+        /// Accepts multiple values: --arrange A:asc B:desc or --arrange A:asc --arrange B:desc
+        #[arg(long, num_args = 1.., value_name = "SPEC")]
         arrange: Vec<String>,
 
         /// Maximum number of rows to return

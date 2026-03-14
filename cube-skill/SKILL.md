@@ -15,11 +15,19 @@ user-invocable: true
 Le CLI `cube` permet d'interroger des fichiers SQLite exportés depuis la plateforme
 UNISIS S3 (Statistiques en Self-Service) de l'Université de Lausanne.
 
-## Principe fondamental
+## Principes fondamentaux
 
-Le CLI est auto-documenté. Ne jamais deviner les noms de cubes, dimensions, valeurs
-ou options : toujours les découvrir via `--help` et `schema` avant de construire
-une requête.
+**Auto-documentation.** Le CLI est auto-documenté. Ne jamais deviner les noms de
+cubes, dimensions, valeurs ou options : toujours les découvrir via `--help` et
+`schema` avant de construire une requête.
+
+**Demander plutôt que supposer.** Quand une ambiguïté persiste après consultation
+du schéma — plusieurs cubes candidats pour une même question, dimension au nommage
+ambigu, valeur de filtre incertaine, périmètre flou de la requête — poser la
+question à l'utilisateur avant de lancer la requête. Expliquer ce qui crée le
+doute (par exemple : « deux cubes contiennent des données d'étudiants :
+X (effectifs inscrits) et Y (effectifs diplômés) — lequel correspond à votre
+question ? ») afin que l'utilisateur puisse trancher en connaissance de cause.
 
 ## Workflow
 
@@ -74,3 +82,15 @@ exprimer avec les flags (sous-requêtes, CASE, HAVING, jointures entre cubes).
 
 Consulter `cube query --help` pour la syntaxe complète.
 Utiliser `--format json` quand le résultat doit être traité programmatiquement.
+
+### 4. Signaler un problème
+
+Si l'utilisateur rencontre une difficulté (cube introuvable, résultat inattendu,
+erreur, donnée manquante), lui proposer d'envoyer un feedback à l'équipe UNISIS :
+
+```bash
+cube feedback "Description du problème rencontré"
+```
+
+Cette commande envoie un email à l'équipe UNISIS avec le message et l'identité
+de l'utilisateur. Elle nécessite une authentification GCP active.
