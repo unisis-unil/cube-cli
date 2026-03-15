@@ -338,27 +338,22 @@ fn main() -> ExitCode {
     let is_feedback = matches!(command, Commands::Feedback { .. });
     let is_data_command = !is_sync && !is_key && !is_feedback;
 
-    // Check for cube updates before schema/query/sql (not sync/key)
-    if is_data_command {
-        commands::sync::check_for_updates(dev);
-
-        // If the cache is empty and the command needs it, offer to sync first
-        if !uses_direct_path(&command) && cache_is_empty(dev) {
-            let sync_cmd = if dev { "cube --dev sync" } else { "cube sync" };
-            if std::io::stderr().is_terminal() {
-                eprintln!("Aucun cube en cache. Lancement de la synchronisation...\n");
-                let bucket = commands::sync::bucket_for(dev);
-                if let Err(e) = commands::sync::run(bucket, "cubes/", None, false) {
-                    error::print_json_error(&e);
-                    return ExitCode::FAILURE;
-                }
-                eprintln!();
-            } else {
-                error::print_json_error(&error::CubeError::not_found(format!(
-                    "Aucun cube en cache. Exécutez '{sync_cmd}' pour télécharger les cubes."
-                )));
+    // If the cache is empty and the command needs it, offer to sync first
+    if is_data_command && !uses_direct_path(&command) && cache_is_empty(dev) {
+        let sync_cmd = if dev { "cube --dev sync" } else { "cube sync" };
+        if std::io::stderr().is_terminal() {
+            eprintln!("Aucun cube en cache. Lancement de la synchronisation...\n");
+            let bucket = commands::sync::bucket_for(dev);
+            if let Err(e) = commands::sync::run(bucket, "cubes/", None, false) {
+                error::print_json_error(&e);
                 return ExitCode::FAILURE;
             }
+            eprintln!();
+        } else {
+            error::print_json_error(&error::CubeError::not_found(format!(
+                "Aucun cube en cache. Exécutez '{sync_cmd}' pour télécharger les cubes."
+            )));
+            return ExitCode::FAILURE;
         }
     }
 
@@ -441,6 +436,9 @@ fn main() -> ExitCode {
                     now.format("%H:%M"),
                     now.format("%:z"),
                 );
+            }
+            if is_data_command {
+                commands::sync::check_for_updates(dev);
             }
             version::check_for_new_version();
             ExitCode::SUCCESS
