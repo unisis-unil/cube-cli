@@ -23,7 +23,8 @@ urlencoding = "2"
 unicode-normalization = "0.1"
 regex = "1"
 flate2 = "1"
-aes-gcm = "0.10"
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
 hex = "0.4"
 
 [dev-dependencies]

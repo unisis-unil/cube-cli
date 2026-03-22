@@ -1,6 +1,7 @@
-use aes_gcm::aead::Aead;
-use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use aes::Aes256;
 use anyhow::{bail, Context, Result};
+use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+type Aes256CbcDec = cbc::Decryptor<Aes256>;
 use base64::Engine;
 use chrono::Utc;
 use console::style;
@@ -297,24 +298,25 @@ fn decompress_gz_bytes(gz_bytes: &[u8], dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Decrypt AES-256-GCM encrypted data.
-/// Format: [1 byte version 0x01][12 bytes nonce][ciphertext + 16 bytes GCM tag]
-fn decrypt_aes_gcm(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
-    if data.len() < 1 + 12 + 16 {
+/// Decrypt AES-256-CBC encrypted data.
+/// Format: [1 byte version 0x02][16 bytes IV][ciphertext PKCS7-padded]
+fn decrypt_aes_cbc(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
+    if data.len() < 1 + 16 + 16 {
         bail!("Fichier chiffré trop court ({} bytes)", data.len());
     }
     let version = data[0];
-    if version != 0x01 {
-        bail!("Version de chiffrement non supportée : {version:#04x}");
+    if version != 0x02 {
+        bail!("Version de chiffrement non supportée : {version:#04x} (attendu: 0x02)");
     }
-    let nonce_bytes = &data[1..13];
-    let ciphertext = &data[13..];
+    let iv = &data[1..17];
+    let ciphertext = &data[17..];
 
-    let cipher = Aes256Gcm::new(key.into());
-    let nonce = Nonce::from_slice(nonce_bytes);
-    cipher.decrypt(nonce, ciphertext).map_err(|_| {
-        anyhow::anyhow!("Déchiffrement AES-GCM échoué (clé incorrecte ou données corrompues)")
-    })
+    let decryptor = Aes256CbcDec::new(key.into(), iv.into());
+    decryptor
+        .decrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(ciphertext)
+        .map_err(|_| {
+            anyhow::anyhow!("Déchiffrement AES-CBC échoué (clé incorrecte ou données corrompues)")
+        })
 }
 
 // ── Download ────────────────────────────────────────────────────────
@@ -514,7 +516,7 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
         sqlite_objects.len()
     );
 
-    // Pre-fetch encryption key for AES-256-GCM decryption (v2 files)
+    // Pre-fetch encryption key for AES-256-CBC decryption (v2 files)
     let has_enc_files = sqlite_objects.iter().any(|o| o.name.ends_with(".gz.enc"));
     let aes_key: [u8; 32] = if has_enc_files {
         let cube_key = super::key::fetch_key_from_gcs(bucket, &token)
@@ -618,10 +620,10 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
 
         // Decrypt (if .enc) then decompress (if .gz) to get the plain .sqlite
         let tmp_sqlite = if is_enc {
-            // AES-256-GCM: decrypt → gzip bytes → decompress
+            // AES-256-CBC: decrypt → gzip bytes → decompress
             let enc_bytes = std::fs::read(&tmp_download).context("Lecture du fichier chiffré")?;
             let _ = std::fs::remove_file(&tmp_download);
-            match decrypt_aes_gcm(&enc_bytes, &aes_key) {
+            match decrypt_aes_cbc(&enc_bytes, &aes_key) {
                 Ok(gz_bytes) => {
                     let tmp_out = cache.join(format!(".{local_filename}.tmp"));
                     match decompress_gz_bytes(&gz_bytes, &tmp_out) {
