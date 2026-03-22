@@ -1,3 +1,5 @@
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use chrono::Utc;
@@ -287,6 +289,34 @@ fn decompress_gz(gz_path: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Decompress gzip bytes (already in memory) to a file.
+fn decompress_gz_bytes(gz_bytes: &[u8], dest: &Path) -> Result<()> {
+    let mut decoder = GzDecoder::new(gz_bytes);
+    let mut out = std::fs::File::create(dest)?;
+    std::io::copy(&mut decoder, &mut out)?;
+    Ok(())
+}
+
+/// Decrypt AES-256-GCM encrypted data.
+/// Format: [1 byte version 0x01][12 bytes nonce][ciphertext + 16 bytes GCM tag]
+fn decrypt_aes_gcm(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
+    if data.len() < 1 + 12 + 16 {
+        bail!("Fichier chiffré trop court ({} bytes)", data.len());
+    }
+    let version = data[0];
+    if version != 0x01 {
+        bail!("Version de chiffrement non supportée : {version:#04x}");
+    }
+    let nonce_bytes = &data[1..13];
+    let ciphertext = &data[13..];
+
+    let cipher = Aes256Gcm::new(key.into());
+    let nonce = Nonce::from_slice(nonce_bytes);
+    cipher.decrypt(nonce, ciphertext).map_err(|_| {
+        anyhow::anyhow!("Déchiffrement AES-GCM échoué (clé incorrecte ou données corrompues)")
+    })
+}
+
 // ── Download ────────────────────────────────────────────────────────
 
 fn download_object(
@@ -463,7 +493,11 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     let sqlite_objects: Vec<GcsObject> = manifest
         .files
         .iter()
-        .filter(|f| f.name.ends_with(".sqlite.gz") || f.name.ends_with(".sqlite"))
+        .filter(|f| {
+            f.name.ends_with(".sqlite.gz.enc")
+                || f.name.ends_with(".sqlite.gz")
+                || f.name.ends_with(".sqlite")
+        })
         .map(|f| GcsObject {
             name: format!("{remote_prefix}{}", f.name),
             size: f.size,
@@ -480,6 +514,23 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
         sqlite_objects.len()
     );
 
+    // Pre-fetch encryption key for AES-256-GCM decryption (v2 files)
+    let has_enc_files = sqlite_objects.iter().any(|o| o.name.ends_with(".gz.enc"));
+    let aes_key: [u8; 32] = if has_enc_files {
+        let cube_key = super::key::fetch_key_from_gcs(bucket, &token)
+            .context("Clé requise pour déchiffrer les cubes .gz.enc")?;
+        if cube_key.version >= 2 {
+            cube_key.decode_aes_key()?
+        } else {
+            bail!(
+                "Les fichiers .gz.enc requièrent une clé v2, mais le bucket contient une clé v{}",
+                cube_key.version
+            );
+        }
+    } else {
+        [0u8; 32] // unused placeholder for v1 snapshots
+    };
+
     // Set up multi-progress display
     let mp = MultiProgress::new();
     let overall = mp.add(ProgressBar::new(sqlite_objects.len() as u64));
@@ -490,27 +541,29 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     let mut skipped: u64 = 0;
     let mut downloaded_bytes: u64 = 0;
 
-    // Map remote .sqlite.gz names to local .sqlite names
+    // Map remote names to local .sqlite names
+    // .sqlite.gz.enc -> .sqlite, .sqlite.gz -> .sqlite, .sqlite -> .sqlite
+    fn strip_remote_suffix(name: &str) -> &str {
+        name.strip_suffix(".gz.enc")
+            .or_else(|| name.strip_suffix(".gz"))
+            .unwrap_or(name)
+    }
+
     let local_filenames: Vec<String> = sqlite_objects
         .iter()
         .filter_map(|o| {
             o.name
                 .rsplit('/')
                 .next()
-                .map(|gz| gz.strip_suffix(".gz").unwrap_or(gz).to_string())
+                .map(|f| strip_remote_suffix(f).to_string())
         })
         .collect();
 
     for obj in &sqlite_objects {
         let remote_filename = obj.name.rsplit('/').next().unwrap_or(&obj.name);
-        let is_gz = remote_filename.ends_with(".gz");
-        let local_filename = if is_gz {
-            remote_filename
-                .strip_suffix(".gz")
-                .unwrap_or(remote_filename)
-        } else {
-            remote_filename
-        };
+        let is_enc = remote_filename.ends_with(".gz.enc");
+        let is_gz = remote_filename.ends_with(".gz") && !is_enc;
+        let local_filename = strip_remote_suffix(remote_filename);
         let display_name = local_filename
             .strip_suffix(".sqlite")
             .unwrap_or(local_filename);
@@ -563,17 +616,47 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
             }
         }
 
-        // If gzipped, decompress; otherwise use the downloaded file directly
-        let tmp_sqlite = if is_gz {
+        // Decrypt (if .enc) then decompress (if .gz) to get the plain .sqlite
+        let tmp_sqlite = if is_enc {
+            // AES-256-GCM: decrypt → gzip bytes → decompress
+            let enc_bytes = std::fs::read(&tmp_download).context("Lecture du fichier chiffré")?;
+            let _ = std::fs::remove_file(&tmp_download);
+            match decrypt_aes_gcm(&enc_bytes, &aes_key) {
+                Ok(gz_bytes) => {
+                    let tmp_out = cache.join(format!(".{local_filename}.tmp"));
+                    match decompress_gz_bytes(&gz_bytes, &tmp_out) {
+                        Ok(()) => tmp_out,
+                        Err(e) => {
+                            let _ = std::fs::remove_file(&tmp_out);
+                            file_pb.set_style(style_done());
+                            file_pb.finish_with_message(format!(
+                                "{} décompression échouée: {e}",
+                                style("✗").yellow(),
+                            ));
+                            overall.inc(1);
+                            continue;
+                        }
+                    }
+                }
+                Err(e) => {
+                    file_pb.set_style(style_done());
+                    file_pb.finish_with_message(format!(
+                        "{} déchiffrement échoué: {e}",
+                        style("✗").yellow(),
+                    ));
+                    overall.inc(1);
+                    continue;
+                }
+            }
+        } else if is_gz {
             let tmp_out = cache.join(format!(".{local_filename}.tmp"));
             if let Err(e) = decompress_gz(&tmp_download, &tmp_out) {
                 let _ = std::fs::remove_file(&tmp_download);
                 let _ = std::fs::remove_file(&tmp_out);
                 file_pb.set_style(style_done());
                 file_pb.finish_with_message(format!(
-                    "{} décompression échouée: {}",
+                    "{} décompression échouée: {e}",
                     style("✗").yellow(),
-                    e
                 ));
                 overall.inc(1);
                 continue;
@@ -634,10 +717,11 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
 
     // Fetch and store the encryption key
     match super::key::fetch_key_from_gcs(bucket, &token) {
-        Ok((version, key)) => {
-            super::key::store_key(&key)?;
+        Ok(cube_key) => {
+            let version = cube_key.version;
+            super::key::store_key(&cube_key)?;
             eprintln!(
-                "\n{} Clé de chiffrement v{version} mise à jour dans le keychain.",
+                "\n{} Clé de chiffrement v{version} mise à jour.",
                 style("🔑").dim()
             );
         }
@@ -659,7 +743,12 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     );
 
     // Post-sync verification: open each cube and check schema + data table
-    let encryption_key = super::key::read_key().ok();
+    // v2 cubes are plain SQLite (decrypted during sync), v1 still need the key
+    let stored_key = super::key::read_key().ok();
+    let encryption_key = stored_key
+        .as_ref()
+        .filter(|k| k.version < 2)
+        .map(|k| k.key.clone());
     let key_ref = encryption_key.as_deref();
     let fail_count = verify_cubes(&cache, key_ref, &mut meta)?;
 

@@ -357,9 +357,12 @@ fn main() -> ExitCode {
         }
     }
 
-    // Read encryption key from keychain only when opening a cube from the cache
+    // Read encryption key only for v1 (SQLCipher) cubes; v2 cubes are plain SQLite
     let encryption_key = if needs_encryption_key(&command) {
-        commands::key::read_key().ok()
+        commands::key::read_key()
+            .ok()
+            .filter(|k| k.version < 2)
+            .map(|k| k.key)
     } else {
         None
     };
