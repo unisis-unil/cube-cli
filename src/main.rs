@@ -220,19 +220,21 @@ enum Commands {
     /// Manage the encryption key
     ///
     /// Without flags, shows key status. Use --refresh to fetch the latest
-    /// key from GCS, or --delete to remove it from the keychain.
+    /// key from GCS, or --delete to remove the local key file.
+    /// The key is stored in ~/.unisis-cube/.key.json and is only needed
+    /// during sync (cubes are stored as plain SQLite after decryption).
     ///
     /// EXAMPLES:
     ///     cube key                # Show key status
     ///     cube key --refresh      # Fetch key from GCS
-    ///     cube key --delete       # Remove key from keychain
+    ///     cube key --delete       # Remove local key file
     #[command(verbatim_doc_comment)]
     Key {
         /// Fetch the latest key from GCS
         #[arg(long)]
         refresh: bool,
 
-        /// Delete the key from the keychain
+        /// Delete the local key file
         #[arg(long)]
         delete: bool,
     },
