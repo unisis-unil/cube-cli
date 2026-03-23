@@ -252,7 +252,11 @@ enum Commands {
     /// Compares timestamps with the local cache and only downloads
     /// files that have been updated.
     ///
+    /// Use --snapshot to sync a specific snapshot instead of the latest.
+    /// Use 'cube snapshots' to list available snapshots.
+    ///
     /// Requires: gcloud auth application-default login
+    #[command(verbatim_doc_comment)]
     Sync {
         /// Object prefix in the bucket
         #[arg(long, value_name = "PREFIX", default_value = "cubes/")]
@@ -265,6 +269,25 @@ enum Commands {
         /// Force re-download of all files, even if the cache is up to date
         #[arg(long)]
         force: bool,
+
+        /// Sync a specific snapshot instead of the latest
+        #[arg(long, value_name = "TIMESTAMP")]
+        snapshot: Option<String>,
+    },
+
+    /// List available cube snapshots on GCS
+    ///
+    /// Shows all snapshot timestamps with their status: complete
+    /// (with manifest) or in-progress/failed (without manifest).
+    ///
+    /// EXAMPLES:
+    ///     cube snapshots
+    ///     cube --dev snapshots
+    #[command(verbatim_doc_comment)]
+    Snapshots {
+        /// Object prefix in the bucket
+        #[arg(long, value_name = "PREFIX", default_value = "cubes/")]
+        prefix: String,
     },
 }
 
@@ -316,7 +339,8 @@ fn main() -> ExitCode {
     let is_sync = matches!(command, Commands::Sync { .. });
     let is_key = matches!(command, Commands::Key { .. });
     let is_feedback = matches!(command, Commands::Feedback { .. });
-    let is_data_command = !is_sync && !is_key && !is_feedback;
+    let is_snapshots = matches!(command, Commands::Snapshots { .. });
+    let is_data_command = !is_sync && !is_key && !is_feedback && !is_snapshots;
 
     // If the cache is empty and the command needs it, offer to sync first
     if is_data_command && !uses_direct_path(&command) && cache_is_empty(dev) {
@@ -324,7 +348,7 @@ fn main() -> ExitCode {
         if std::io::stderr().is_terminal() {
             eprintln!("Aucun cube en cache. Lancement de la synchronisation...\n");
             let bucket = commands::sync::bucket_for(dev);
-            if let Err(e) = commands::sync::run(bucket, "cubes/", None, false) {
+            if let Err(e) = commands::sync::run(bucket, "cubes/", None, false, None) {
                 error::print_json_error(&e);
                 return ExitCode::FAILURE;
             }
@@ -387,9 +411,20 @@ fn main() -> ExitCode {
             prefix,
             cache_dir,
             force,
+            snapshot,
         } => {
             let bucket = commands::sync::bucket_for(dev);
-            commands::sync::run(bucket, &prefix, cache_dir.as_deref(), force)
+            commands::sync::run(
+                bucket,
+                &prefix,
+                cache_dir.as_deref(),
+                force,
+                snapshot.as_deref(),
+            )
+        }
+        Commands::Snapshots { prefix } => {
+            let bucket = commands::sync::bucket_for(dev);
+            commands::sync::list_snapshots(bucket, &prefix)
         }
     };
 

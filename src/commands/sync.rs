@@ -429,7 +429,54 @@ fn check_latest_timestamp_quiet(bucket: &str, prefix: &str) -> Option<String> {
 
 // ── run ─────────────────────────────────────────────────────────────
 
-pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) -> Result<()> {
+/// List available snapshots on GCS.
+pub fn list_snapshots(bucket: &str, prefix: &str) -> Result<()> {
+    eprintln!("Authentification...");
+    let token = get_access_token()?;
+    let client = Client::new();
+
+    let prefixes = gcs_list_prefixes(&client, &token, bucket, prefix)?;
+
+    if prefixes.is_empty() {
+        eprintln!("Aucun snapshot trouvé sous gs://{bucket}/{prefix}");
+        return Ok(());
+    }
+
+    let mut sorted: Vec<&String> = prefixes.iter().collect();
+    sorted.sort();
+    sorted.reverse();
+
+    for p in &sorted {
+        let ts = p.trim_end_matches('/').rsplit('/').next().unwrap_or(p);
+        let snapshot_prefix = format!("{prefix}{ts}/");
+        let manifest = fetch_manifest(&client, &token, bucket, &snapshot_prefix)?;
+        let status = if let Some(m) = manifest {
+            let count = m
+                .files
+                .iter()
+                .filter(|f| {
+                    f.name.ends_with(".sqlite.gz.enc")
+                        || f.name.ends_with(".sqlite.gz")
+                        || f.name.ends_with(".sqlite")
+                })
+                .count();
+            format!("{count} cube(s)")
+        } else {
+            "pas de manifeste".to_string()
+        };
+        println!("{ts}  {status}");
+    }
+
+    Ok(())
+}
+
+pub fn run(
+    bucket: &str,
+    prefix: &str,
+    cache_dir: Option<&Path>,
+    force: bool,
+    snapshot: Option<&str>,
+) -> Result<()> {
     let dev = bucket == BUCKET_DEV;
     let cache = match cache_dir {
         Some(p) => p.to_path_buf(),
@@ -453,14 +500,24 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     let token = get_access_token()?;
     let client = Client::new();
 
-    eprintln!("Recherche du dernier snapshot complet sur gs://{bucket}/{prefix} ...");
-    let (remote_ts, manifest) = match find_latest_ready_snapshot(&client, &token, bucket, prefix)? {
-        Some(result) => result,
-        None => {
-            return Err(crate::error::CubeError::unavailable(
-                "Aucun snapshot complet trouvé (aucun manifeste disponible). \
-                 Un export est peut-être en cours. Réessayez plus tard.",
-            ));
+    let (remote_ts, manifest) = if let Some(ts) = snapshot {
+        eprintln!("Synchronisation du snapshot {ts} sur gs://{bucket}/{prefix} ...");
+        let snapshot_prefix = format!("{prefix}{ts}/");
+        let manifest =
+            fetch_manifest(&client, &token, bucket, &snapshot_prefix)?.ok_or_else(|| {
+                anyhow::anyhow!("Snapshot {ts} n'a pas de manifeste (export en cours ou échoué).")
+            })?;
+        (ts.to_string(), manifest)
+    } else {
+        eprintln!("Recherche du dernier snapshot complet sur gs://{bucket}/{prefix} ...");
+        match find_latest_ready_snapshot(&client, &token, bucket, prefix)? {
+            Some(result) => result,
+            None => {
+                return Err(crate::error::CubeError::unavailable(
+                    "Aucun snapshot complet trouvé (aucun manifeste disponible). \
+                     Un export est peut-être en cours. Réessayez plus tard.",
+                ));
+            }
         }
     };
     let remote_prefix = format!("{prefix}{remote_ts}/");
