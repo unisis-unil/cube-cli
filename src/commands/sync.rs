@@ -255,10 +255,9 @@ fn local_crc32c_b64(path: &Path) -> Result<String> {
 
 // ── SQLite integrity ────────────────────────────────────────────────
 
-/// Quick integrity check: open the file (with optional encryption key),
-/// verify the schema metadata is readable.
+/// Quick integrity check: open the file and verify the schema metadata is readable.
 #[allow(dead_code)]
-fn sqlite_integrity_ok(path: &Path, key: Option<&str>) -> bool {
+fn sqlite_integrity_ok(path: &Path) -> bool {
     let conn = match rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -266,11 +265,6 @@ fn sqlite_integrity_ok(path: &Path, key: Option<&str>) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
-    if let Some(k) = key {
-        if conn.pragma_update(None, "key", k).is_err() {
-            return false;
-        }
-    }
     conn.query_row(
         "SELECT value FROM metadata WHERE key = 'schema'",
         [],
@@ -519,7 +513,7 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     // Pre-fetch encryption key for AES-256-CBC decryption (v2 files)
     let has_enc_files = sqlite_objects.iter().any(|o| o.name.ends_with(".gz.enc"));
     let aes_key: [u8; 32] = if has_enc_files {
-        let cube_key = super::key::fetch_key_from_gcs(bucket, &token)
+        let cube_key = super::key::fetch_snapshot_key(bucket, &token, &remote_prefix)
             .context("Clé requise pour déchiffrer les cubes .gz.enc")?;
         if cube_key.version >= 2 {
             cube_key.decode_aes_key()?
@@ -717,23 +711,8 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     meta.last_checked_at = Some(Utc::now().to_rfc3339());
     write_sync_metadata(&cache, &meta)?;
 
-    // Fetch and store the encryption key
-    match super::key::fetch_key_from_gcs(bucket, &token) {
-        Ok(cube_key) => {
-            let version = cube_key.version;
-            super::key::store_key(&cube_key)?;
-            eprintln!(
-                "\n{} Clé de chiffrement v{version} mise à jour.",
-                style("🔑").dim()
-            );
-        }
-        Err(_) => {
-            eprintln!(
-                "\n{} Clé de chiffrement non trouvée dans le bucket (cubes non chiffrés).",
-                style("⚠").yellow()
-            );
-        }
-    }
+    // Clean up legacy key file (SQLCipher v1 is no longer supported)
+    super::key::cleanup_legacy_key_file();
 
     eprintln!(
         "\n{} Synchronisation terminée — {} téléchargé(s) ({}), {} à jour. Cache : {}",
@@ -745,14 +724,7 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
     );
 
     // Post-sync verification: open each cube and check schema + data table
-    // v2 cubes are plain SQLite (decrypted during sync), v1 still need the key
-    let stored_key = super::key::read_key().ok();
-    let encryption_key = stored_key
-        .as_ref()
-        .filter(|k| k.version < 2)
-        .map(|k| k.key.clone());
-    let key_ref = encryption_key.as_deref();
-    let fail_count = verify_cubes(&cache, key_ref, &mut meta)?;
+    let fail_count = verify_cubes(&cache, &mut meta)?;
 
     if fail_count > 0 {
         // Persist invalidated checksums so next sync retries failed cubes
@@ -769,7 +741,7 @@ pub fn run(bucket: &str, prefix: &str, cache_dir: Option<&Path>, force: bool) ->
 
 pub(crate) const CATALOGUE_FILE: &str = ".catalogue.json";
 
-fn verify_cubes(cache: &Path, key: Option<&str>, meta: &mut SyncMetadata) -> Result<u32> {
+fn verify_cubes(cache: &Path, meta: &mut SyncMetadata) -> Result<u32> {
     let mut cubes: Vec<std::path::PathBuf> = std::fs::read_dir(cache)?
         .flatten()
         .map(|e| e.path())
@@ -794,7 +766,7 @@ fn verify_cubes(cache: &Path, key: Option<&str>, meta: &mut SyncMetadata) -> Res
             .and_then(|n| n.to_str())
             .unwrap_or_default();
 
-        match verify_and_catalogue_cube(path, key) {
+        match verify_and_catalogue_cube(path) {
             Ok((row_count, entry)) => {
                 ok_count += 1;
                 eprintln!("  {} {} ({} lignes)", style("✓").green(), name, row_count);
@@ -840,8 +812,8 @@ fn verify_cubes(cache: &Path, key: Option<&str>, meta: &mut SyncMetadata) -> Res
 }
 
 /// Verify a single cube and build its catalogue entry.
-fn verify_and_catalogue_cube(path: &Path, key: Option<&str>) -> Result<(i64, serde_json::Value)> {
-    let conn = crate::db::open_with_key(path, key)?;
+fn verify_and_catalogue_cube(path: &Path) -> Result<(i64, serde_json::Value)> {
+    let conn = crate::db::open(path)?;
 
     let schema = crate::db::read_metadata_schema(&conn).context("Schéma métadonnées illisible")?;
 
@@ -950,7 +922,7 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        assert!(sqlite_integrity_ok(&path, None));
+        assert!(sqlite_integrity_ok(&path));
     }
 
     #[test]
@@ -958,7 +930,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("bad.sqlite");
         std::fs::write(&path, b"this is not a sqlite file").unwrap();
-        assert!(!sqlite_integrity_ok(&path, None));
+        assert!(!sqlite_integrity_ok(&path));
     }
 
     #[test]
@@ -968,7 +940,7 @@ mod tests {
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute_batch("CREATE TABLE data (x TEXT);").unwrap();
         drop(conn);
-        assert!(!sqlite_integrity_ok(&path, None));
+        assert!(!sqlite_integrity_ok(&path));
     }
 
     #[test]
@@ -1105,7 +1077,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let (row_count, entry) = verify_and_catalogue_cube(&path, None).unwrap();
+        let (row_count, entry) = verify_and_catalogue_cube(&path).unwrap();
         assert_eq!(row_count, 2);
         assert_eq!(entry["name"], "test");
         assert_eq!(entry["cube"], "Test");
@@ -1120,7 +1092,7 @@ mod tests {
         conn.execute_batch("CREATE TABLE data (x TEXT);").unwrap();
         drop(conn);
 
-        assert!(verify_and_catalogue_cube(&path, None).is_err());
+        assert!(verify_and_catalogue_cube(&path).is_err());
     }
 
     #[test]
@@ -1135,7 +1107,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        assert!(verify_and_catalogue_cube(&path, None).is_err());
+        assert!(verify_and_catalogue_cube(&path).is_err());
     }
 
     #[test]
@@ -1144,7 +1116,7 @@ mod tests {
         let path = tmp.path().join("corrupt.sqlite");
         std::fs::write(&path, b"not a database").unwrap();
 
-        assert!(verify_and_catalogue_cube(&path, None).is_err());
+        assert!(verify_and_catalogue_cube(&path).is_err());
     }
 
     #[test]
@@ -1176,7 +1148,7 @@ mod tests {
         meta.file_checksums
             .insert("bad.sqlite".to_string(), "bbb==".to_string());
 
-        let fail_count = verify_cubes(tmp.path(), None, &mut meta).unwrap();
+        let fail_count = verify_cubes(tmp.path(), &mut meta).unwrap();
         assert_eq!(fail_count, 1);
         // Checksum of the failed cube should be invalidated
         assert!(meta.file_checksums.contains_key("good.sqlite"));

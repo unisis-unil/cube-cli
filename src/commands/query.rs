@@ -128,7 +128,6 @@ pub(crate) fn build_order_by(specs: &[String]) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
 pub fn run(
     file: &Path,
     select: &[String],
@@ -141,36 +140,7 @@ pub fn run(
     no_aggregate: bool,
     format: &str,
 ) -> Result<()> {
-    run_with_key(
-        file,
-        select,
-        filter,
-        exclude,
-        group_by,
-        arrange,
-        limit,
-        indicator,
-        no_aggregate,
-        format,
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn run_with_key(
-    file: &Path,
-    select: &[String],
-    filter: &[String],
-    exclude: &[String],
-    group_by: &[String],
-    arrange: &[String],
-    limit: Option<usize>,
-    indicator: &str,
-    no_aggregate: bool,
-    format: &str,
-    key: Option<&str>,
-) -> Result<()> {
-    let conn = db::open_with_key(file, key)?;
+    let conn = db::open(file)?;
     let includes = parse_filters(filter)?;
     let excludes = parse_filters(exclude)?;
     let select_flat = flatten_args(select);

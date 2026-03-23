@@ -217,27 +217,15 @@ enum Commands {
         format: String,
     },
 
-    /// Manage the encryption key
+    /// Show encryption key status on GCS
     ///
-    /// Without flags, shows key status. Use --refresh to fetch the latest
-    /// key from GCS, or --delete to remove the local key file.
-    /// The key is stored in ~/.unisis-cube/.key.json and is only needed
-    /// during sync (cubes are stored as plain SQLite after decryption).
+    /// Displays the version of the encryption key stored on the GCS bucket.
+    /// Cubes are now stored as plain SQLite (decrypted during sync).
     ///
     /// EXAMPLES:
-    ///     cube key                # Show key status
-    ///     cube key --refresh      # Fetch key from GCS
-    ///     cube key --delete       # Remove local key file
+    ///     cube key
     #[command(verbatim_doc_comment)]
-    Key {
-        /// Fetch the latest key from GCS
-        #[arg(long)]
-        refresh: bool,
-
-        /// Delete the local key file
-        #[arg(long)]
-        delete: bool,
-    },
+    Key {},
 
     /// Send feedback about cube-cli to the UNISIS team
     ///
@@ -309,16 +297,6 @@ fn uses_direct_path(command: &Commands) -> bool {
     name.contains('/') || name.contains('\\') || std::path::Path::new(&name).extension().is_some()
 }
 
-/// Returns true if the command will open a cube from the cache (needs encryption key).
-fn needs_encryption_key(command: &Commands) -> bool {
-    match command {
-        Commands::Query { .. } | Commands::Sql { .. } => !uses_direct_path(command),
-        Commands::Schema { name: Some(_), .. } => !uses_direct_path(command),
-        Commands::Schema { name: None, .. } => true, // catalogue opens all cached cubes
-        _ => false,
-    }
-}
-
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -359,28 +337,16 @@ fn main() -> ExitCode {
         }
     }
 
-    // Read encryption key only for v1 (SQLCipher) cubes; v2 cubes are plain SQLite
-    let encryption_key = if needs_encryption_key(&command) {
-        commands::key::read_key()
-            .ok()
-            .filter(|k| k.version < 2)
-            .map(|k| k.key)
-    } else {
-        None
-    };
-    let key_ref = encryption_key.as_deref();
-
     let result = match command {
         Commands::Schema {
             name,
             dimension,
             search,
-        } => commands::schema::run_with_key(
+        } => commands::schema::run(
             name.as_deref(),
             dimension.as_deref(),
             search.as_deref(),
             dev,
-            key_ref,
         ),
         Commands::Query {
             file,
@@ -395,7 +361,7 @@ fn main() -> ExitCode {
             format,
         } => commands::schema::resolve_cube(file.to_str().unwrap_or_default(), dev).and_then(
             |path| {
-                commands::query::run_with_key(
+                commands::query::run(
                     &path,
                     &select,
                     &filter,
@@ -406,7 +372,6 @@ fn main() -> ExitCode {
                     &indicator,
                     no_aggregate,
                     &format,
-                    key_ref,
                 )
             },
         ),
@@ -415,8 +380,8 @@ fn main() -> ExitCode {
             query,
             format,
         } => commands::schema::resolve_cube(file.to_str().unwrap_or_default(), dev)
-            .and_then(|path| commands::sql::run_with_key(&path, &query, &format, key_ref)),
-        Commands::Key { refresh, delete } => commands::key::run(refresh, delete, dev),
+            .and_then(|path| commands::sql::run(&path, &query, &format)),
+        Commands::Key {} => commands::key::run(dev),
         Commands::Feedback { message } => commands::feedback::run(message.as_deref(), dev),
         Commands::Sync {
             prefix,

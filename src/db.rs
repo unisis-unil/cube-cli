@@ -3,12 +3,7 @@ use rusqlite::Connection;
 use serde_json::Value;
 use std::path::Path;
 
-#[allow(dead_code)]
 pub fn open(path: &Path) -> Result<Connection> {
-    open_with_key(path, None)
-}
-
-pub fn open_with_key(path: &Path, key: Option<&str>) -> Result<Connection> {
     if !path.exists() {
         return Err(crate::error::CubeError::not_found(format!(
             "Fichier introuvable : {}",
@@ -17,16 +12,6 @@ pub fn open_with_key(path: &Path, key: Option<&str>) -> Result<Connection> {
     }
     let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("Impossible d'ouvrir {}", path.display()))?;
-
-    if let Some(k) = key {
-        // Encrypted database: apply the key via raw SQL for full control over quoting
-        conn.execute_batch(&format!("PRAGMA key = '{}'", k.replace('\'', "''")))
-            .with_context(|| "Impossible d'appliquer la clé de chiffrement")?;
-    } else {
-        // No key: tell SQLCipher this is a plain (unencrypted) SQLite database
-        conn.execute_batch("PRAGMA cipher_plaintext_header_size = 32; PRAGMA key = '';")?;
-    }
-
     Ok(conn)
 }
 

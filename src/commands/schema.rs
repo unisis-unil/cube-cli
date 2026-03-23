@@ -35,46 +35,31 @@ pub(crate) fn resolve_cube(name: &str, dev: bool) -> Result<PathBuf> {
     )))
 }
 
-#[allow(dead_code)]
 pub fn run(
     name: Option<&str>,
     dimension: Option<&str>,
     search: Option<&str>,
     dev: bool,
 ) -> Result<()> {
-    run_with_key(name, dimension, search, dev, None)
-}
-
-pub fn run_with_key(
-    name: Option<&str>,
-    dimension: Option<&str>,
-    search: Option<&str>,
-    dev: bool,
-    key: Option<&str>,
-) -> Result<()> {
     match (name, dimension) {
-        (None, _) => list_cubes(search, dev, key),
+        (None, _) => list_cubes(search, dev),
         (Some(n), None) => {
             let path = resolve_cube(n, dev)?;
-            let schema = build_schema_with_key(&path, key)?;
+            let schema = build_schema(&path)?;
             println!("{}", serde_json::to_string_pretty(&schema)?);
             Ok(())
         }
         (Some(n), Some(dim)) => {
             let path = resolve_cube(n, dev)?;
-            let result = list_dimension_values_with_key(&path, dim, key)?;
+            let result = list_dimension_values(&path, dim)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
     }
 }
 
-fn list_dimension_values_with_key(
-    file: &Path,
-    dimension: &str,
-    key: Option<&str>,
-) -> Result<Value> {
-    let conn = db::open_with_key(file, key)?;
+fn list_dimension_values(file: &Path, dimension: &str) -> Result<Value> {
+    let conn = db::open(file)?;
     let schema = db::read_metadata_schema(&conn)?;
     let columns = db::get_table_columns(&conn, "data")?;
 
@@ -117,7 +102,7 @@ fn normalize_for_search(s: &str) -> String {
 
 /// Level 0: compact catalogue — name, description, measure (no dimensions).
 /// Uses the cached catalogue built during sync when available.
-fn list_cubes(search: Option<&str>, dev: bool, key: Option<&str>) -> Result<()> {
+fn list_cubes(search: Option<&str>, dev: bool) -> Result<()> {
     let cache = default_cache_dir(dev)?;
     if !cache.exists() {
         return Err(CubeError::not_found(
@@ -136,7 +121,7 @@ fn list_cubes(search: Option<&str>, dev: bool, key: Option<&str>) -> Result<()> 
     };
 
     // Try reading the cached catalogue first
-    let mut cubes = read_catalogue_cache(&cache, key)?;
+    let mut cubes = read_catalogue_cache(&cache)?;
 
     // Apply search filter
     if let Some(ref re) = search_re {
@@ -156,7 +141,7 @@ fn list_cubes(search: Option<&str>, dev: bool, key: Option<&str>) -> Result<()> 
 }
 
 /// Read the catalogue from the cache file, or rebuild it by opening each cube.
-fn read_catalogue_cache(cache: &std::path::Path, key: Option<&str>) -> Result<Vec<Value>> {
+fn read_catalogue_cache(cache: &std::path::Path) -> Result<Vec<Value>> {
     let catalogue_path = cache.join(super::sync::CATALOGUE_FILE);
 
     if catalogue_path.exists() {
@@ -178,7 +163,7 @@ fn read_catalogue_cache(cache: &std::path::Path, key: Option<&str>) -> Result<Ve
                 .unwrap_or("?")
                 .to_string();
 
-            match build_catalogue_entry(&path, key) {
+            match build_catalogue_entry(&path) {
                 Ok(entry_val) => cubes.push(entry_val),
                 Err(_) => {
                     cubes.push(json!({
@@ -204,8 +189,8 @@ fn read_catalogue_cache(cache: &std::path::Path, key: Option<&str>) -> Result<Ve
 }
 
 /// Build a compact catalogue entry for level 0 (no dimensions, no file path).
-fn build_catalogue_entry(file: &Path, key: Option<&str>) -> Result<Value> {
-    let conn = db::open_with_key(file, key)?;
+fn build_catalogue_entry(file: &Path) -> Result<Value> {
+    let conn = db::open(file)?;
     let schema = db::read_metadata_schema(&conn)?;
     let row_count = db::get_row_count(&conn)?;
     let columns = db::get_table_columns(&conn, "data")?;
@@ -232,13 +217,8 @@ fn build_catalogue_entry(file: &Path, key: Option<&str>) -> Result<Value> {
 }
 
 /// Level 1: cube schema — dimensions with type, description and cardinality (no values).
-#[allow(dead_code)]
 pub(crate) fn build_schema(file: &Path) -> Result<Value> {
-    build_schema_with_key(file, None)
-}
-
-fn build_schema_with_key(file: &Path, key: Option<&str>) -> Result<Value> {
-    let conn = db::open_with_key(file, key)?;
+    let conn = db::open(file)?;
     let mut schema = db::read_metadata_schema(&conn)?;
     let columns = db::get_table_columns(&conn, "data")?;
     let row_count = db::get_row_count(&conn)?;
@@ -402,7 +382,7 @@ mod tests {
     #[test]
     fn test_build_catalogue_entry() {
         let tmp = create_test_db();
-        let entry = build_catalogue_entry(tmp.path(), None).unwrap();
+        let entry = build_catalogue_entry(tmp.path()).unwrap();
         assert_eq!(entry["cube"], "Infrastructures");
         assert_eq!(entry["row_count"], 3);
         assert_eq!(entry["dimension_count"], 2);
@@ -413,7 +393,7 @@ mod tests {
     #[test]
     fn test_list_dimension_values() {
         let tmp = create_test_db();
-        let result = list_dimension_values_with_key(tmp.path(), "Faculté", None).unwrap();
+        let result = list_dimension_values(tmp.path(), "Faculté").unwrap();
         assert_eq!(result["dimension"], "Faculté");
         assert_eq!(result["distinct_count"], 2);
         let values = result["values"].as_array().unwrap();
@@ -424,7 +404,7 @@ mod tests {
     #[test]
     fn test_list_dimension_values_not_found() {
         let tmp = create_test_db();
-        let result = list_dimension_values_with_key(tmp.path(), "Nonexistent", None);
+        let result = list_dimension_values(tmp.path(), "Nonexistent");
         assert!(result.is_err());
         let err = result.unwrap_err();
         let cube_err = err.downcast_ref::<CubeError>().unwrap();
@@ -541,7 +521,7 @@ mod tests {
     #[test]
     fn test_build_catalogue_entry_includes_numeric_dimensions_in_count() {
         let tmp = create_mixed_type_db();
-        let entry = build_catalogue_entry(tmp.path(), None).unwrap();
+        let entry = build_catalogue_entry(tmp.path()).unwrap();
         assert_eq!(entry["dimension_count"], 4);
         // Level 0: no dimensions list, only count
         assert!(entry.get("dimensions").is_none());

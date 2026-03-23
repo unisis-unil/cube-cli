@@ -5,13 +5,8 @@ use std::path::Path;
 use crate::db;
 use crate::formatter;
 
-#[allow(dead_code)]
 pub fn run(file: &Path, query: &str, format: &str) -> Result<()> {
-    run_with_key(file, query, format, None)
-}
-
-pub fn run_with_key(file: &Path, query: &str, format: &str, key: Option<&str>) -> Result<()> {
-    let conn = db::open_with_key(file, key)?;
+    let conn = db::open(file)?;
     let mut stmt = conn.prepare(query)?;
     let col_count = stmt.column_count();
     let col_names: Vec<String> = (0..col_count)
