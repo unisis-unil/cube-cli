@@ -365,10 +365,6 @@ fn style_download() -> ProgressStyle {
     .progress_chars("━╸─")
 }
 
-fn style_done() -> ProgressStyle {
-    ProgressStyle::with_template("  {msg} {prefix}").unwrap()
-}
-
 fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
@@ -628,15 +624,13 @@ pub fn run(
         if local_path.exists() {
             if let Some(stored_crc) = meta.file_checksums.get(local_filename) {
                 if *stored_crc == obj.crc32c {
-                    let done_pb = mp.add(ProgressBar::new(0));
-                    done_pb.set_style(style_done());
-                    done_pb.set_prefix(display_name.to_string());
                     let local_size = std::fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0);
-                    done_pb.finish_with_message(format!(
-                        "{} à jour ({})",
+                    eprintln!(
+                        "  {} {} à jour ({})",
                         style("✓").green(),
+                        display_name,
                         format_size(local_size)
-                    ));
+                    );
                     skipped += 1;
                     overall.inc(1);
                     continue;
@@ -652,8 +646,8 @@ pub fn run(
 
         if let Err(e) = download_object(&client, &token, bucket, obj, &tmp_download, &file_pb) {
             let _ = std::fs::remove_file(&tmp_download);
-            file_pb.set_style(style_done());
-            file_pb.finish_with_message(format!("{} erreur", style("✗").red()));
+            file_pb.finish_and_clear();
+            eprintln!("  {} {} erreur", style("✗").red(), display_name);
             bail!(e);
         }
 
@@ -661,9 +655,12 @@ pub fn run(
         if let Ok(local_hash) = local_crc32c_b64(&tmp_download) {
             if local_hash != obj.crc32c {
                 let _ = std::fs::remove_file(&tmp_download);
-                file_pb.set_style(style_done());
-                file_pb
-                    .finish_with_message(format!("{} hash incorrect, ignoré", style("✗").yellow()));
+                file_pb.finish_and_clear();
+                eprintln!(
+                    "  {} {} hash incorrect, ignoré",
+                    style("✗").yellow(),
+                    display_name
+                );
                 overall.inc(1);
                 continue;
             }
@@ -681,22 +678,24 @@ pub fn run(
                         Ok(()) => tmp_out,
                         Err(e) => {
                             let _ = std::fs::remove_file(&tmp_out);
-                            file_pb.set_style(style_done());
-                            file_pb.finish_with_message(format!(
-                                "{} décompression échouée: {e}",
+                            file_pb.finish_and_clear();
+                            eprintln!(
+                                "  {} {} décompression échouée: {e}",
                                 style("✗").yellow(),
-                            ));
+                                display_name
+                            );
                             overall.inc(1);
                             continue;
                         }
                     }
                 }
                 Err(e) => {
-                    file_pb.set_style(style_done());
-                    file_pb.finish_with_message(format!(
-                        "{} déchiffrement échoué: {e}",
+                    file_pb.finish_and_clear();
+                    eprintln!(
+                        "  {} {} déchiffrement échoué: {e}",
                         style("✗").yellow(),
-                    ));
+                        display_name
+                    );
                     overall.inc(1);
                     continue;
                 }
@@ -706,11 +705,12 @@ pub fn run(
             if let Err(e) = decompress_gz(&tmp_download, &tmp_out) {
                 let _ = std::fs::remove_file(&tmp_download);
                 let _ = std::fs::remove_file(&tmp_out);
-                file_pb.set_style(style_done());
-                file_pb.finish_with_message(format!(
-                    "{} décompression échouée: {e}",
+                file_pb.finish_and_clear();
+                eprintln!(
+                    "  {} {} décompression échouée: {e}",
                     style("✗").yellow(),
-                ));
+                    display_name
+                );
                 overall.inc(1);
                 continue;
             }
@@ -726,20 +726,22 @@ pub fn run(
         meta.file_checksums
             .insert(local_filename.to_string(), obj.crc32c.clone());
 
-        file_pb.set_style(style_done());
-        if is_gz {
-            file_pb.finish_with_message(format!(
-                "{} téléchargé ({} gz → {})",
+        file_pb.finish_and_clear();
+        if is_gz || is_enc {
+            eprintln!(
+                "  {} {} téléchargé ({} → {})",
                 style("✓").green(),
+                display_name,
                 format_size(obj.size),
                 format_size(final_size)
-            ));
+            );
         } else {
-            file_pb.finish_with_message(format!(
-                "{} téléchargé ({})",
+            eprintln!(
+                "  {} {} téléchargé ({})",
                 style("✓").green(),
+                display_name,
                 format_size(final_size)
-            ));
+            );
         }
 
         downloaded += 1;

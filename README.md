@@ -82,25 +82,29 @@ cube query infrastructures_surface --group-by Faculté --format json
 cube sql infrastructures_surface "SELECT Faculté, SUM(indicateur) FROM data GROUP BY Faculté"
 ```
 
-### Gérer la clé de chiffrement
+### Statut de la clé
 
 ```bash
-cube key              # Afficher le statut de la clé
-cube key --refresh    # Récupérer la clé depuis GCS
-cube key --delete     # Supprimer la clé locale
+cube key              # Afficher la version de la clé sur GCS
 ```
-
-La clé est stockée dans `~/.unisis-cube/.key.json` (permissions 0600).
 
 ### Synchroniser les cubes
 
 ```bash
-cube sync             # Télécharger/mettre à jour depuis PROD
-cube --dev sync       # Depuis l'environnement DEV
-cube sync --force     # Forcer le re-téléchargement complet
+cube sync                                  # Télécharger le dernier snapshot depuis PROD
+cube --dev sync                            # Depuis l'environnement DEV
+cube sync --force                          # Forcer le re-téléchargement complet
+cube sync --snapshot 2026-03-23T151240     # Syncer un snapshot spécifique
 ```
 
-La synchronisation récupère automatiquement la clé de déchiffrement, déchiffre et décompresse les cubes, puis vérifie l'intégrité de chaque cube téléchargé.
+### Lister les snapshots disponibles
+
+```bash
+cube snapshots                             # PROD
+cube --dev snapshots                       # DEV
+```
+
+La synchronisation récupère la clé du snapshot, déchiffre et décompresse les cubes, puis vérifie l'intégrité de chaque cube téléchargé.
 
 ## Cache local
 
