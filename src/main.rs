@@ -289,6 +289,23 @@ enum Commands {
         #[arg(long, value_name = "PREFIX", default_value = "cubes/")]
         prefix: String,
     },
+
+    /// Remove all cached cubes and metadata
+    ///
+    /// Deletes the entire local cache directory (~/.unisis-cube/cache/
+    /// or ~/.unisis-cube/cache-dev/ with --dev). Prompts for confirmation
+    /// unless --yes is passed.
+    ///
+    /// EXAMPLES:
+    ///     cube clean           # PROD cache, avec confirmation
+    ///     cube --dev clean     # DEV cache
+    ///     cube clean --yes     # Sans confirmation
+    #[command(verbatim_doc_comment)]
+    Clean {
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 /// Returns true if the local cache directory has no .sqlite files.
@@ -340,7 +357,8 @@ fn main() -> ExitCode {
     let is_key = matches!(command, Commands::Key { .. });
     let is_feedback = matches!(command, Commands::Feedback { .. });
     let is_snapshots = matches!(command, Commands::Snapshots { .. });
-    let is_data_command = !is_sync && !is_key && !is_feedback && !is_snapshots;
+    let is_clean = matches!(command, Commands::Clean { .. });
+    let is_data_command = !is_sync && !is_key && !is_feedback && !is_snapshots && !is_clean;
 
     // If the cache is empty and the command needs it, offer to sync first
     if is_data_command && !uses_direct_path(&command) && cache_is_empty(dev) {
@@ -426,6 +444,7 @@ fn main() -> ExitCode {
             let bucket = commands::sync::bucket_for(dev);
             commands::sync::list_snapshots(bucket, &prefix)
         }
+        Commands::Clean { yes } => commands::clean::run(dev, yes),
     };
 
     match result {

@@ -352,14 +352,16 @@ fn download_object(
 // ── Progress styles ─────────────────────────────────────────────────
 
 fn style_overall() -> ProgressStyle {
-    ProgressStyle::with_template("{prefix:.bold.cyan} [{bar:30.cyan/dim}] {pos}/{len} cubes  {msg}")
-        .unwrap()
-        .progress_chars("━╸─")
+    ProgressStyle::with_template(
+        "{prefix:4.bold.cyan} [{bar:30.cyan/dim}] {pos}/{len} cubes  {msg}",
+    )
+    .unwrap()
+    .progress_chars("━╸─")
 }
 
 fn style_download() -> ProgressStyle {
     ProgressStyle::with_template(
-        "  [{bar:25.green/dim}] {bytes}/{total_bytes} {bytes_per_sec}  {prefix}",
+        "{prefix:4.bold.green} [{bar:30.green/dim}] {bytes}/{total_bytes} {bytes_per_sec}  {msg}",
     )
     .unwrap()
     .progress_chars("━╸─")
@@ -584,7 +586,7 @@ pub fn run(
     let mp = MultiProgress::new();
     let overall = mp.add(ProgressBar::new(sqlite_objects.len() as u64));
     overall.set_style(style_overall());
-    overall.set_prefix("sync");
+    overall.set_prefix("all");
 
     let mut downloaded: u64 = 0;
     let mut skipped: u64 = 0;
@@ -625,12 +627,12 @@ pub fn run(
             if let Some(stored_crc) = meta.file_checksums.get(local_filename) {
                 if *stored_crc == obj.crc32c {
                     let local_size = std::fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0);
-                    eprintln!(
-                        "  {} {} à jour ({})",
+                    overall.println(format!(
+                        "   {} {} à jour ({})",
                         style("✓").green(),
                         display_name,
                         format_size(local_size)
-                    );
+                    ));
                     skipped += 1;
                     overall.inc(1);
                     continue;
@@ -640,14 +642,15 @@ pub fn run(
 
         // Download to a temp file
         let tmp_download = cache.join(format!(".{remote_filename}.tmp"));
-        let file_pb = mp.add(ProgressBar::new(obj.size));
+        let file_pb = mp.insert_before(&overall, ProgressBar::new(obj.size));
         file_pb.set_style(style_download());
-        file_pb.set_prefix(display_name.to_string());
+        file_pb.set_prefix("sync");
+        file_pb.set_message(display_name.to_string());
 
         if let Err(e) = download_object(&client, &token, bucket, obj, &tmp_download, &file_pb) {
             let _ = std::fs::remove_file(&tmp_download);
             file_pb.finish_and_clear();
-            eprintln!("  {} {} erreur", style("✗").red(), display_name);
+            overall.println(format!("   {} {} erreur", style("✗").red(), display_name));
             bail!(e);
         }
 
@@ -656,11 +659,11 @@ pub fn run(
             if local_hash != obj.crc32c {
                 let _ = std::fs::remove_file(&tmp_download);
                 file_pb.finish_and_clear();
-                eprintln!(
-                    "  {} {} hash incorrect, ignoré",
+                overall.println(format!(
+                    "   {} {} hash incorrect, ignoré",
                     style("✗").yellow(),
                     display_name
-                );
+                ));
                 overall.inc(1);
                 continue;
             }
@@ -679,11 +682,11 @@ pub fn run(
                         Err(e) => {
                             let _ = std::fs::remove_file(&tmp_out);
                             file_pb.finish_and_clear();
-                            eprintln!(
-                                "  {} {} décompression échouée: {e}",
+                            overall.println(format!(
+                                "   {} {} décompression échouée: {e}",
                                 style("✗").yellow(),
                                 display_name
-                            );
+                            ));
                             overall.inc(1);
                             continue;
                         }
@@ -691,11 +694,11 @@ pub fn run(
                 }
                 Err(e) => {
                     file_pb.finish_and_clear();
-                    eprintln!(
-                        "  {} {} déchiffrement échoué: {e}",
+                    overall.println(format!(
+                        "   {} {} déchiffrement échoué: {e}",
                         style("✗").yellow(),
                         display_name
-                    );
+                    ));
                     overall.inc(1);
                     continue;
                 }
@@ -706,11 +709,11 @@ pub fn run(
                 let _ = std::fs::remove_file(&tmp_download);
                 let _ = std::fs::remove_file(&tmp_out);
                 file_pb.finish_and_clear();
-                eprintln!(
-                    "  {} {} décompression échouée: {e}",
+                overall.println(format!(
+                    "   {} {} décompression échouée: {e}",
                     style("✗").yellow(),
                     display_name
-                );
+                ));
                 overall.inc(1);
                 continue;
             }
@@ -728,20 +731,20 @@ pub fn run(
 
         file_pb.finish_and_clear();
         if is_gz || is_enc {
-            eprintln!(
-                "  {} {} téléchargé ({} → {})",
+            overall.println(format!(
+                "   {} {} téléchargé ({} → {})",
                 style("✓").green(),
                 display_name,
                 format_size(obj.size),
                 format_size(final_size)
-            );
+            ));
         } else {
-            eprintln!(
-                "  {} {} téléchargé ({})",
+            overall.println(format!(
+                "   {} {} téléchargé ({})",
                 style("✓").green(),
                 display_name,
                 format_size(final_size)
-            );
+            ));
         }
 
         downloaded += 1;
